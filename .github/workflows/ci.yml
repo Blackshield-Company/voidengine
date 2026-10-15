@@ -24,5 +24,5 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build Odin vendor libs
-        run: make -C "$(odin root)/vendor/cgltf/src"
+        run: bash "$(odin root)/vendor/cgltf/src/build_cgltf.sh"
       - run: make
