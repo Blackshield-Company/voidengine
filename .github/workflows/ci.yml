@@ -23,4 +23,6 @@ jobs:
       - uses: laytan/setup-odin@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Odin vendor libs
+        run: make -C "$(odin root)/vendor/cgltf/src"
       - run: make
