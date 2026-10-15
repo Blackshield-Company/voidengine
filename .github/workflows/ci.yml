@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: System deps
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsdl2-dev >/dev/null
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev >/dev/null
       - uses: laytan/setup-odin@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
