@@ -3,7 +3,7 @@
 # VoidEngine 🎮🌆
 
 ![Version](https://img.shields.io/badge/version-v0.6.0-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+![License](https://img.shields.io/badge/license-Apache--2.0-green)
 ![Engine](https://img.shields.io/badge/engine-Odin%20%2B%20SDL2-orange)
 
 A lightweight game engine with hot-reload, ECS, physics, audio — and now a
@@ -278,7 +278,7 @@ The test suite covers config creation, component helpers, entity creation, colli
 
 ## License
 
-MIT
+Apache-2.0, see [LICENSE](LICENSE).
 
 ---
 
