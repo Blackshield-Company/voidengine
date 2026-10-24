@@ -4,7 +4,7 @@ version = "0.3.0"
 description = "VoidEngine Studio — build and test games"
 authors = ["synth"]
 license = "Apache-2.0"
-repository = "https://github.com/synthalorian/voidengine"
+repository = "https://github.com/Blackshield-Company/voidengine"
 edition = "2021"
 rust-version = "1.77.2"
 
