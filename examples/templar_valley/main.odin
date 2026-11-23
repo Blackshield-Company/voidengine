@@ -69,8 +69,8 @@ LOOK_SHOTS := [?]Look_Shot{
     {name = "look-mounted-55", ref = "after-mounted.png", at = {120, -562}, heading = 0, mounted = true, yaw_deg = 0, pitch_deg = 55, zoom = 8, ahead = 1.5, t = 2.3},
     {name = "look-mounted-25", ref = "after-mounted-horizon-25deg.png", at = {150, -560}, heading = 0, mounted = true, yaw_deg = 0, pitch_deg = 25, zoom = 8, ahead = 1.5, t = 3.1},
     {name = "look-onfoot", ref = "after-onfoot.png", at = {790, -480}, heading = math.PI, mounted = false, yaw_deg = 90, pitch_deg = 55, zoom = 20, ahead = 0, t = 1.0},
-    {name = "debug-rider", ref = "", at = {120, -562}, heading = 0, mounted = true, yaw_deg = -60, pitch_deg = 12, zoom = 5, ahead = 0, t = 2.3},
-    {name = "debug-grass", ref = "", at = {60, -470}, heading = 0, mounted = false, yaw_deg = 30, pitch_deg = 20, zoom = 6, ahead = 0, t = 1.0},
+    {name = "rider-close", ref = "", at = {120, -562}, heading = 0, mounted = true, yaw_deg = -60, pitch_deg = 12, zoom = 5, ahead = 0, t = 2.3},
+    {name = "meadow-close", ref = "", at = {60, -470}, heading = 0, mounted = false, yaw_deg = 30, pitch_deg = 20, zoom = 6, ahead = 0, t = 1.0},
     {name = "valley-north-low", ref = "", at = {6, -300}, heading = -math.PI / 2, mounted = true, yaw_deg = 180, pitch_deg = 14, zoom = 11, ahead = 1.5, t = 0.7},
 }
 
@@ -104,6 +104,8 @@ Game :: struct {
 
     assets: [dynamic]^Asset, // heap: GL3D_Model keeps a pointer to its R3D_Model
     props:  [dynamic]Prop,
+    cells:  []Prop_Cell,      // PROP_GRID^2 buckets for culling
+    shadow_lists: [dynamic][dynamic]linalg.Matrix4f32, // per asset, reused per cascade
     a_pine, a_common, a_house, a_clutter, a_grass: [dynamic]int,
 
     // grass cells: key -> instances
@@ -137,11 +139,38 @@ Game :: struct {
     out_w, out_h: int,
     bench:     int,
     bench_pitch: f32,
-    frame_ms:  [dynamic]f64,
+    frame_ms:  [dynamic]f64, // draw_world + glFinish
+    cpu_ms:    [dynamic]f64, // draw_world submission only
     frame:     int,
     deterministic: bool,
     last_ns:   i64,
     stats:     Draw_Stats,
+}
+
+PROP_CELL :: f32(64)
+PROP_GRID :: 32 // 2048 m / 64 m
+
+Prop_Cell :: struct {
+    props:      [dynamic]i32,
+    bmin, bmax: [3]f32,
+}
+
+build_prop_grid :: proc(g: ^Game) {
+    g.cells = make([]Prop_Cell, PROP_GRID * PROP_GRID)
+    for &c in g.cells { c.bmin = {max(f32), max(f32), max(f32)}; c.bmax = {min(f32), min(f32), min(f32)} }
+    for &p, i in g.props {
+        cx := clamp(int((p.center.x + HALF_EXTENT) / PROP_CELL), 0, PROP_GRID - 1)
+        cz := clamp(int((p.center.z + HALF_EXTENT) / PROP_CELL), 0, PROP_GRID - 1)
+        c := &g.cells[cz * PROP_GRID + cx]
+        append(&c.props, i32(i))
+        c.bmin = linalg.min(c.bmin, p.center - p.radius)
+        c.bmax = linalg.max(c.bmax, p.center + p.radius)
+    }
+}
+
+aabb_distance :: proc(p, bmin, bmax: [3]f32) -> f32 {
+    q := linalg.clamp(p, bmin, bmax)
+    return linalg.length(p - q)
 }
 
 Draw_Stats :: struct { chunks, trees, buildings, clutter, grass: int }
@@ -368,7 +397,7 @@ game_init :: proc(e: ^ve.Engine) {
     g.horse = load_asset(g, "horse", FETCHED + "/horse.glb")
     for n in ([]string{"pine_1", "pine_2"}) { append(&g.a_pine, load_asset(g, n, fmt.tprintf("%s/%s.glb", FETCHED, n))) }
     for n in ([]string{"common_tree_1", "common_tree_2"}) { append(&g.a_common, load_asset(g, n, fmt.tprintf("%s/%s.glb", FETCHED, n))) }
-    for n in ([]string{"house_1", "house_2", "house_3", "house_4"}) { append(&g.a_house, load_asset(g, n, fmt.tprintf("%s/%s.glb", FETCHED, n))) }
+    for n in ([]string{"house_1", "house_2", "house_3"}) { append(&g.a_house, load_asset(g, n, fmt.tprintf("%s/%s.glb", FETCHED, n))) }
     for n in ([]string{"crate", "barrel", "hay", "rock_medium_1"}) { append(&g.a_clutter, load_asset(g, n, fmt.tprintf("%s/%s.glb", FETCHED, n))) }
     for n in ([]string{"grass_common_short", "grass_wispy_short"}) { append(&g.a_grass, load_asset(g, n, fmt.tprintf("%s/%s.glb", FETCHED, n))) }
     // The kit's grass atlas is bright stylised yellow-green; pull it toward
@@ -376,6 +405,7 @@ game_init :: proc(e: ^ve.Engine) {
     for ai in g.a_grass { for &mt in g.assets[ai].model.materials { mt.base_color = {0.62, 0.74, 0.46, 1} } }
     for a in g.assets { fmt.printfln("  asset %-20s bounds %v .. %v", a.name, a.bmin, a.bmax) }
     load_props(g)
+    build_prop_grid(g)
 
     // rider (Quaternius King) and horse
     king := g.assets[g.king]
@@ -545,12 +575,17 @@ draw_world :: proc(g: ^Game) {
     for a in g.assets { clear(&a.inst) }
     g.stats = {}
     eye := cam.position
-    for &p in g.props {
-        d := linalg.length(p.center - eye) - p.radius
-        rng := p.kind == 't' ? TREE_RANGE : (p.kind == 'b' ? BUILDING_RANGE : CLUTTER_RANGE)
-        if d > rng || !ve.r3d_frustum_sphere(&fr, p.center, p.radius) { continue }
-        append(&g.assets[p.asset].inst, p.mat)
-        switch p.kind { case 't': g.stats.trees += 1; case 'b': g.stats.buildings += 1; case 'c': g.stats.clutter += 1 }
+    for &cell in g.cells {
+        if len(cell.props) == 0 || aabb_distance(eye, cell.bmin, cell.bmax) > BUILDING_RANGE { continue }
+        if !ve.r3d_frustum_aabb(&fr, cell.bmin, cell.bmax) { continue }
+        for pi in cell.props {
+            p := &g.props[pi]
+            d := linalg.length(p.center - eye) - p.radius
+            rng := p.kind == 't' ? TREE_RANGE : (p.kind == 'b' ? BUILDING_RANGE : CLUTTER_RANGE)
+            if d > rng || !ve.r3d_frustum_sphere(&fr, p.center, p.radius) { continue }
+            append(&g.assets[p.asset].inst, p.mat)
+            switch p.kind { case 't': g.stats.trees += 1; case 'b': g.stats.buildings += 1; case 'c': g.stats.clutter += 1 }
+        }
     }
     for _, &cell in g.grass_cells {
         for &p in cell {
@@ -564,32 +599,36 @@ draw_world :: proc(g: ^Game) {
     ve.gl3d_env_update(r, &g.env, cam)
     hm := horse_matrix(g)
     rm := rider_matrix(g)
-    shadow_inst: [dynamic]linalg.Matrix4f32
-    defer delete(shadow_inst)
+    if len(g.shadow_lists) != len(g.assets) { resize(&g.shadow_lists, len(g.assets)) }
     for c in 0 ..< ve.R3D_CSM_CASCADES {
         lvp := g.env.csm.light_vp[c]
         lf := ve.r3d_frustum_from_matrix(lvp, true)
         ve.gl3d_env_shadow_begin(&g.env, c)
         ve.gl3d_terrain_draw_shadow(&g.gter, &g.ter, lvp, eye)
         ve.gl3d_pbr_shadow_begin_vp(&g.pbr, lvp)
-        for ai in 0 ..< len(g.assets) {
-            if ai == g.king || ai == g.horse { continue }
-            clear(&shadow_inst)
-            for &p in g.props {
-                if p.asset != ai { continue }
-                if linalg.length(p.center - eye) - p.radius > g.env.csm.splits[c + 1] + 40 { continue }
+        for &l in g.shadow_lists { clear(&l) }
+        reach := g.env.csm.splits[c + 1] + 40
+        for &cell in g.cells {
+            if len(cell.props) == 0 || aabb_distance(eye, cell.bmin, cell.bmax) > reach { continue }
+            if !ve.r3d_frustum_aabb(&lf, cell.bmin, cell.bmax) { continue }
+            for pi in cell.props {
+                p := &g.props[pi]
+                if linalg.length(p.center - eye) - p.radius > reach { continue }
                 if !ve.r3d_frustum_sphere(&lf, p.center, p.radius) { continue }
-                append(&shadow_inst, p.mat)
+                append(&g.shadow_lists[p.asset], p.mat)
             }
-            if c == 0 {
-                for _, &cell in g.grass_cells {
-                    for &p in cell {
-                        if p.asset != ai || !ve.r3d_frustum_sphere(&lf, p.center, p.radius) { continue }
-                        append(&shadow_inst, p.mat)
-                    }
+        }
+        if c == 0 {
+            for _, &cell in g.grass_cells {
+                for &p in cell {
+                    if !ve.r3d_frustum_sphere(&lf, p.center, p.radius) { continue }
+                    append(&g.shadow_lists[p.asset], p.mat)
                 }
             }
-            ve.gl3d_pbr_draw_model_shadow_instanced(&g.pbr, &g.assets[ai].gl, &g.assets[ai].pose, shadow_inst[:])
+        }
+        for ai in 0 ..< len(g.assets) {
+            if ai == g.king || ai == g.horse { continue }
+            ve.gl3d_pbr_draw_model_shadow_instanced(&g.pbr, &g.assets[ai].gl, &g.assets[ai].pose, g.shadow_lists[ai][:])
         }
         ve.gl3d_pbr_draw_model_shadow(r, &g.pbr, &g.assets[g.horse].gl, &g.horse_pose, hm)
         ve.gl3d_pbr_draw_model_shadow(r, &g.pbr, &g.assets[g.king].gl, &g.king_pose, rm)
@@ -688,6 +727,7 @@ game_render :: proc(e: ^ve.Engine, _: ^SDL.Renderer) {
     t0 := time.tick_now()
     draw_world(g)
     if g.bench > 0 {
+        append(&g.cpu_ms, time.duration_milliseconds(time.tick_since(t0)))
         gl.Finish()
         append(&g.frame_ms, time.duration_milliseconds(time.tick_since(t0)))
     }
@@ -707,9 +747,12 @@ game_render :: proc(e: ^ve.Engine, _: ^SDL.Renderer) {
         slice.sort(sorted)
         sum: f64 = 0
         for v in ms { sum += v }
+        csum: f64 = 0
+        cms := g.cpu_ms[min(10, len(g.cpu_ms)):]
+        for v in cms { csum += v }
         pct :: proc(s: []f64, p: f64) -> f64 { return s[min(int(p * f64(len(s))), len(s) - 1)] }
-        fmt.printfln("BENCH templar_valley %dx%d pitch=%.0f frames=%d avg_ms=%.2f p50=%.2f p95=%.2f p99=%.2f max=%.2f fps_avg=%.1f chunks=%d trees=%d buildings=%d grass=%d",
-            g.r.width, g.r.height, g.bench_pitch, len(ms), sum / f64(len(ms)), pct(sorted, 0.5), pct(sorted, 0.95), pct(sorted, 0.99), sorted[len(sorted) - 1],
+        fmt.printfln("BENCH templar_valley %dx%d pitch=%.0f frames=%d avg_ms=%.2f cpu_submit_ms=%.2f p50=%.2f p95=%.2f p99=%.2f max=%.2f fps_avg=%.1f chunks=%d trees=%d buildings=%d grass=%d",
+            g.r.width, g.r.height, g.bench_pitch, len(ms), sum / f64(len(ms)), csum / f64(max(len(cms), 1)), pct(sorted, 0.5), pct(sorted, 0.95), pct(sorted, 0.99), sorted[len(sorted) - 1],
             1000.0 * f64(len(ms)) / sum, g.stats.chunks, g.stats.trees, g.stats.buildings, g.stats.grass)
         e.running = false
     }
@@ -757,6 +800,10 @@ game_shutdown :: proc(e: ^ve.Engine) {
         free(a)
     }
     for _, v in g.grass_cells { delete(v) }
+    for &c in g.cells { delete(c.props) }
+    delete(g.cells)
+    for l in g.shadow_lists { delete(l) }
+    delete(g.shadow_lists)
     delete(g.grass_cells)
     ve.r3d_model_pose_destroy(&g.king_pose)
     ve.r3d_model_pose_destroy(&g.horse_pose)

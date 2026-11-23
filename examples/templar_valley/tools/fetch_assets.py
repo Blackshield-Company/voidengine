@@ -31,7 +31,6 @@ for pack, name in [
     ("quaternius-medievalvillage", "house_1"),
     ("quaternius-medievalvillage", "house_2"),
     ("quaternius-medievalvillage", "house_3"),
-    ("quaternius-medievalvillage", "house_4"),
     ("quaternius-medievalvillage", "crate"),
     ("quaternius-medievalvillage", "barrel"),
     ("quaternius-medievalvillage", "hay"),
