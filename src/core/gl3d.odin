@@ -817,17 +817,21 @@ gl3d_load_texture :: proc(path: string, repeat := false) -> (tex: u32, w, h: i32
     src := img.pixels.buf[:]
 
     rgba: []u8
+    // The expanded buffer must outlive the upload below, so free it at proc
+    // exit: a defer inside the else-if block ran before the upload.
+    expanded := false
+    defer if expanded { delete(rgba) }
     if img.channels == 4 {
         rgba = src
     } else if img.channels == 3 {
         rgba = make([]u8, w * h * 4)
+        expanded = true
         for i in 0 ..< int(w * h) {
             rgba[i * 4 + 0] = src[i * 3 + 0]
             rgba[i * 4 + 1] = src[i * 3 + 1]
             rgba[i * 4 + 2] = src[i * 3 + 2]
             rgba[i * 4 + 3] = 255
         }
-        defer delete(rgba)
     } else {
         fmt.eprintln("gl3d: unsupported channel count in:", path)
         return 0, 0, 0, false
