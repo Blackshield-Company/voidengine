@@ -103,6 +103,7 @@ uniform vec4  u_mat;       // x metallic, y roughness, z normal scale, w occlusi
 uniform vec3  u_emissive;
 uniform float u_alpha_cutoff; // < 0: opaque
 uniform int   u_double_sided;
+uniform int   u_blend;
 
 out vec4 frag_color;
 
@@ -136,14 +137,14 @@ float D_ggx(float ndh, float a) {
 float G_smith(float ndv, float ndl, float rough) {
     float k = (rough + 1.0) * (rough + 1.0) / 8.0;
     float gv = ndv / (ndv * (1.0 - k) + k);
-    float gl_ = ndl / (ndl * (1.0 - k) + k);
-    return gv * gl_;
+    float gl1 = ndl / (ndl * (1.0 - k) + k);
+    return gv * gl1;
 }
 vec3 F_schlick(float c, vec3 f0) {
-    return f0 + (1.0 - f0) * pow(1.0 - c, 5.0);
+    return f0 + (1.0 - f0) * pow(clamp(1.0 - c, 0.0, 1.0), 5.0);
 }
 vec3 F_schlick_rough(float c, vec3 f0, float rough) {
-    return f0 + (max(vec3(1.0 - rough), f0) - f0) * pow(1.0 - c, 5.0);
+    return f0 + (max(vec3(1.0 - rough), f0) - f0) * pow(clamp(1.0 - c, 0.0, 1.0), 5.0);
 }
 
 // Light colors are treated as irradiance scale (x PI), matching the
@@ -151,10 +152,11 @@ vec3 F_schlick_rough(float c, vec3 f0, float rough) {
 vec3 shade(vec3 N, vec3 V, vec3 L, vec3 albedo, float metal, float rough, vec3 f0) {
     float ndl = max(dot(N, L), 0.0);
     if (ndl <= 0.0) return vec3(0.0);
-    vec3  H   = normalize(L + V);
+    vec3  hv  = L + V;
+    vec3  H   = hv / max(length(hv), 1e-5);
     float ndv = max(dot(N, V), 1e-4);
     float ndh = max(dot(N, H), 0.0);
-    float vdh = max(dot(V, H), 0.0);
+    float vdh = clamp(dot(V, H), 0.0, 1.0);
     float a   = rough * rough;
     vec3  F   = F_schlick(vdh, f0);
     vec3  spec = D_ggx(ndh, a) * G_smith(ndv, ndl, rough) * F / (4.0 * ndv * ndl + 1e-4);
@@ -174,11 +176,15 @@ void main() {
     vec3 N = normalize(v_normal);
     vec3 T = v_tangent.xyz;
     if (u_double_sided == 1 && !gl_FrontFacing) { N = -N; T = -T; }
-    T = normalize(T - N * dot(N, T));
-    vec3 B = cross(N, T) * (v_tangent.w < 0.0 ? -1.0 : 1.0);
-    vec3 tn = texture(u_normal_tex, v_uv).xyz * 2.0 - 1.0;
-    tn.xy *= u_mat.z;
-    N = normalize(mat3(T, B, N) * tn);
+    T = T - N * dot(N, T);
+    float tlen = length(T);
+    if (tlen > 1e-5) { // skip normal mapping where the tangent frame is degenerate
+        T /= tlen;
+        vec3 B = cross(N, T) * (v_tangent.w < 0.0 ? -1.0 : 1.0);
+        vec3 tn = texture(u_normal_tex, v_uv).xyz * 2.0 - 1.0;
+        tn.xy *= u_mat.z;
+        N = normalize(mat3(T, B, N) * tn);
+    }
 
     vec3 V = normalize(u_camera_pos.xyz - v_world);
     vec3 albedo = base.rgb;
@@ -220,7 +226,11 @@ void main() {
     vec3  fog_col = u_fog_color.rgb + u_sun_color.rgb * 0.08 * sun_amt;
     lit = mix(lit, fog_col, clamp(fog_f, 0.0, 1.0));
 
-    frag_color = vec4(lit, base.a);
+    // pow() of a negative base or a zero-length normalize gives NaN, and one
+    // NaN pixel turns into a black block after the bloom blur: never emit one
+    if (any(isnan(lit)) || any(isinf(lit))) lit = vec3(0.0);
+    // glTF: OPAQUE and MASK ignore alpha (and must not blend)
+    frag_color = vec4(max(lit, vec3(0.0)), u_blend == 1 ? clamp(base.a, 0.0, 1.0) : 1.0);
 }
 `
 
@@ -243,7 +253,7 @@ GL3D_Pbr :: struct {
     flat_normal_tex: u32,
     // uniform locations (main program)
     loc_model, loc_skinned, loc_uv_scale, loc_base_color, loc_mat, loc_emissive: i32,
-    loc_alpha_cutoff, loc_double_sided: i32,
+    loc_alpha_cutoff, loc_double_sided, loc_blend: i32,
     // shadow program
     sloc_model, sloc_skinned, sloc_light_vp: i32,
 }
@@ -277,6 +287,7 @@ gl3d_pbr_init :: proc() -> (p: GL3D_Pbr, ok: bool) {
     p.loc_emissive     = gl.GetUniformLocation(p.prog, "u_emissive")
     p.loc_alpha_cutoff = gl.GetUniformLocation(p.prog, "u_alpha_cutoff")
     p.loc_double_sided = gl.GetUniformLocation(p.prog, "u_double_sided")
+    p.loc_blend        = gl.GetUniformLocation(p.prog, "u_blend")
     p.sloc_model    = gl.GetUniformLocation(p.shadow_prog, "u_model")
     p.sloc_skinned  = gl.GetUniformLocation(p.shadow_prog, "u_skinned")
     p.sloc_light_vp = gl.GetUniformLocation(p.shadow_prog, "u_light_vp")
@@ -449,6 +460,7 @@ gl3d_pbr_draw_model :: proc(r: ^GL3D_Renderer, pbr: ^GL3D_Pbr, gm: ^GL3D_Model, 
         gl.Uniform3f(pbr.loc_emissive, mt.emissive.x, mt.emissive.y, mt.emissive.z)
         gl.Uniform1f(pbr.loc_alpha_cutoff, mt.alpha_mode == .Mask ? mt.alpha_cutoff : -1)
         gl.Uniform1i(pbr.loc_double_sided, mt.double_sided ? 1 : 0)
+        gl.Uniform1i(pbr.loc_blend, mt.alpha_mode == .Blend ? 1 : 0)
 
         gl.ActiveTexture(gl.TEXTURE0)
         gl.BindTexture(gl.TEXTURE_2D, tex(gm.tex_srgb[:], mt.base_color_tex, pbr.white_tex))

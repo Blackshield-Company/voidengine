@@ -234,6 +234,11 @@ test_model_add_mesh_tangents :: proc(t: ^testing.T) {
         testing.expect(t, near(linalg.dot(v.tangent.xyz, v.normal), 0))
         testing.expect(t, near3(v.tangent.xyz, {1, 0, 0})) // plane u runs along +X
     }
+    // front faces (CCW) point up the normals, so back-face culling keeps them
+    for i := 0; i + 2 < len(p.indices); i += 3 {
+        a, b, c := p.vertices[p.indices[i]].pos, p.vertices[p.indices[i + 1]].pos, p.vertices[p.indices[i + 2]].pos
+        testing.expect(t, linalg.cross(b - a, c - a).y > 0)
+    }
 }
 
 // The CC0 KayKit knight used by examples/templar3d (skipped when absent).
@@ -270,4 +275,25 @@ test_model_load_kaykit_knight :: proc(t: ^testing.T) {
         }
     }
     testing.expect(t, moved > 100)
+}
+
+// Palette-style uvs (tiny or zero uv area) must still give finite, unit,
+// perpendicular tangents.
+@(test)
+test_tangents_degenerate_uvs :: proc(t: ^testing.T) {
+    verts := []engine.R3D_Skin_Vertex{
+        {pos = {0, 0, 0}, normal = {0, 0, 1}, uv = {0.5, 0.5}},
+        {pos = {1, 0, 0}, normal = {0, 0, 1}, uv = {0.5 + 1e-7, 0.5}},
+        {pos = {0, 1, 0}, normal = {0, 0, 1}, uv = {0.5, 0.5 + 3e-8}},
+        {pos = {1, 1, 0}, normal = {0, 0, 1}, uv = {0.5, 0.5}},
+    }
+    idx := []u32{0, 1, 2, 1, 3, 2}
+    engine.r3d_generate_tangents(verts, idx)
+    for v in verts {
+        tn := v.tangent.xyz
+        testing.expect(t, !math.is_nan(tn.x) && !math.is_nan(tn.y) && !math.is_nan(tn.z))
+        testing.expect(t, near(linalg.length(tn), 1))
+        testing.expect(t, near(linalg.dot(tn, v.normal), 0))
+        testing.expect(t, v.tangent.w == 1 || v.tangent.w == -1)
+    }
 }

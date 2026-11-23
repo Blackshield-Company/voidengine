@@ -377,6 +377,7 @@ r3d_model_add_mesh :: proc(m: ^R3D_Model, name: string, mesh: ^R3D_Mesh_Data, ma
         append(&p.vertices, R3D_Skin_Vertex{pos = v.pos, normal = v.normal, uv = v.uv})
     }
     for i in mesh.indices { append(&p.indices, i) }
+    r3d_fix_winding(p.vertices[:], p.indices[:])
     r3d_generate_tangents(p.vertices[:], p.indices[:])
     r3d_prim_bounds(&p)
     append(&m.prims, p)
@@ -448,6 +449,19 @@ r3d_model_load_primitive :: proc(data: ^cgltf.data, p: ^cgltf.primitive) -> (pri
     return
 }
 
+// Make every triangle counter-clockwise when seen from the side its vertex
+// normals point to (glTF front faces), so back-face culling keeps it. Some
+// engine mesh builders (r3d_mesh_plane) wind the other way.
+r3d_fix_winding :: proc(verts: []R3D_Skin_Vertex, indices: []u32) {
+    for i := 0; i + 2 < len(indices); i += 3 {
+        a, b, c := verts[indices[i]], verts[indices[i + 1]], verts[indices[i + 2]]
+        g := linalg.cross(b.pos - a.pos, c.pos - a.pos)
+        if linalg.dot(g, a.normal + b.normal + c.normal) < 0 {
+            indices[i + 1], indices[i + 2] = indices[i + 2], indices[i + 1]
+        }
+    }
+}
+
 r3d_prim_bounds :: proc(p: ^R3D_Model_Prim) {
     if len(p.vertices) == 0 { return }
     p.bounds_min = p.vertices[0].pos
@@ -486,10 +500,18 @@ r3d_generate_tangents :: proc(verts: []R3D_Skin_Vertex, indices: []u32) {
         du1, dv1 := v1.uv.x - v0.uv.x, v1.uv.y - v0.uv.y
         du2, dv2 := v2.uv.x - v0.uv.x, v2.uv.y - v0.uv.y
         det := du1 * dv2 - du2 * dv1
-        if math.abs(det) < 1e-12 { continue }
+        // palette-textured meshes (all three uvs on one texel) have ~0 uv
+        // area: skip them rather than blow up to inf/NaN
+        if !(math.abs(det) > 1e-10) { continue }
         r := 1 / det
         t := (e1 * dv2 - e2 * dv1) * r
         b := (e2 * du1 - e1 * du2) * r
+        // weight by triangle area, not 1/uv-area (stable for tiny uv islands)
+        tl, bl := linalg.length(t), linalg.length(b)
+        area := linalg.length(linalg.cross(e1, e2))
+        if !(tl > 1e-20) || !(bl > 1e-20) || !(tl < 1e30) || !(bl < 1e30) { continue }
+        t = t / tl * area
+        b = b / bl * area
         for k in ([3]u32{i0, i1, i2}) {
             tan[k] += t
             bit[k] += b
@@ -499,7 +521,7 @@ r3d_generate_tangents :: proc(verts: []R3D_Skin_Vertex, indices: []u32) {
         nn := verts[i].normal
         t := tan[i] - nn * linalg.dot(nn, tan[i])
         l := linalg.length(t)
-        if l < 1e-8 {
+        if !(l > 1e-8) || !(l < 1e30) { // NaN-safe
             // any perpendicular
             ref := math.abs(nn.y) < 0.99 ? [3]f32{0, 1, 0} : [3]f32{1, 0, 0}
             t = linalg.normalize(linalg.cross(ref, nn))
