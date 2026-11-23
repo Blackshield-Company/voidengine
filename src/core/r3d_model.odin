@@ -23,6 +23,7 @@ import "core:math/linalg"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "core:encoding/base64"
 import "core:image"
 import _ "core:image/png"
 import _ "core:image/jpeg"
@@ -186,8 +187,12 @@ r3d_model_load :: proc(path: string, allocator := context.allocator) -> (model: 
             bytes = p[:im.buffer_view.size]
         } else if im.uri != nil {
             uri := string(im.uri)
-            if !strings.has_prefix(uri, "data:") {
-                full, _ := filepath.join({base_dir, uri}, context.temp_allocator)
+            if strings.has_prefix(uri, "data:") {
+                d, dok := r3d_decode_data_uri(uri)
+                if dok { bytes = d; owned = true }
+            } else {
+                rel := r3d_uri_unescape(uri, context.temp_allocator)
+                full, _ := filepath.join({base_dir, rel}, context.temp_allocator)
                 d, err := os.read_entire_file_from_path(full, context.allocator)
                 if err == nil { bytes = d; owned = true }
             }
@@ -595,4 +600,46 @@ r3d_model_pose_destroy :: proc(p: ^R3D_Model_Pose) {
     delete(p.global)
     for j in p.joints { delete(j) }
     delete(p.joints)
+}
+
+// Bytes of an RFC 2397 data URI ("data:[<mime>][;base64],<payload>"), as
+// glTF embeds images; the payload may be base64 or percent-encoded.
+r3d_decode_data_uri :: proc(uri: string, allocator := context.allocator) -> (bytes: []u8, ok: bool) {
+    if !strings.has_prefix(uri, "data:") { return nil, false }
+    comma := strings.index_byte(uri, ',')
+    if comma < 0 { return nil, false }
+    header := uri[5:comma]
+    payload := uri[comma + 1:]
+    if strings.has_suffix(header, ";base64") {
+        out, err := base64.decode(payload, allocator = allocator)
+        if err != nil { return nil, false }
+        return out, true
+    }
+    raw := r3d_uri_unescape(payload, allocator)
+    return transmute([]u8)raw, true
+}
+
+// Percent-decoding (%20 -> ' ') for glTF uris; other bytes are copied.
+r3d_uri_unescape :: proc(s: string, allocator := context.allocator) -> string {
+    hex :: proc(c: u8) -> int {
+        switch c {
+        case '0' ..= '9': return int(c - '0')
+        case 'a' ..= 'f': return int(c - 'a') + 10
+        case 'A' ..= 'F': return int(c - 'A') + 10
+        }
+        return -1
+    }
+    out := make([dynamic]u8, 0, len(s), allocator)
+    for i := 0; i < len(s); i += 1 {
+        if s[i] == '%' && i + 2 < len(s) {
+            h, l := hex(s[i + 1]), hex(s[i + 2])
+            if h >= 0 && l >= 0 {
+                append(&out, u8(h * 16 + l))
+                i += 2
+                continue
+            }
+        }
+        append(&out, s[i])
+    }
+    return string(out[:])
 }

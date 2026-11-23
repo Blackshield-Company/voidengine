@@ -8,6 +8,7 @@ package voidengine_test
 import "core:fmt"
 import "core:math"
 import "core:os"
+import "core:encoding/base64"
 import "core:testing"
 import "core:math/linalg"
 import engine "../src/core"
@@ -296,4 +297,64 @@ test_tangents_degenerate_uvs :: proc(t: ^testing.T) {
         testing.expect(t, near(linalg.dot(tn, v.normal), 0))
         testing.expect(t, v.tangent.w == 1 || v.tangent.w == -1)
     }
+}
+
+@(test)
+test_data_uri_helpers :: proc(t: ^testing.T) {
+    b, ok := engine.r3d_decode_data_uri("data:application/octet-stream;base64,AAEC/w==")
+    defer delete(b)
+    testing.expect(t, ok && len(b) == 4 && b[0] == 0 && b[1] == 1 && b[2] == 2 && b[3] == 255)
+    p, ok2 := engine.r3d_decode_data_uri("data:,a%20b")
+    defer delete(p)
+    testing.expect(t, ok2 && string(p) == "a b")
+    _, bad := engine.r3d_decode_data_uri("data:image/png;base64")
+    testing.expect(t, !bad)
+    u := engine.r3d_uri_unescape("my%20tex%2Fx%zz.png")
+    defer delete(u)
+    testing.expect_value(t, u, "my tex/x%zz.png")
+}
+
+// A .gltf (text) whose buffer and first image are base64 data URIs and whose
+// second image is an external file with a percent-escaped name.
+@(test)
+test_model_load_data_uri_images :: proc(t: ^testing.T) {
+    bin: [dynamic]u8
+    defer delete(bin)
+    for v in ([?]f32{0, 0, 0, 1, 0, 0, 0, 1, 0}) { glb_f32(&bin, v) }   // positions
+    for v in ([?]f32{0, 0, 1, 0, 0, 1}) { glb_f32(&bin, v) }            // uvs
+    buf_b64, _ := base64.encode(bin[:])
+    defer delete(buf_b64)
+    png_b64, _ := base64.encode(SKIN_PNG[:])
+    defer delete(png_b64)
+    dir := "/tmp/voidengine_test_datauri"
+    os.make_directory(dir)
+    defer os.remove(dir)
+    ext := "/tmp/voidengine_test_datauri/tiny tex.png"
+    testing.expect(t, os.write_entire_file(ext, SKIN_PNG[:]) == nil)
+    defer os.remove(ext)
+    js := fmt.aprintf(
+        `{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],` +
+        `"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"TEXCOORD_0":1}},"material":0}}]}}],` +
+        `"materials":[{{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}}}},"emissiveTexture":{{"index":1}}}}],` +
+        `"textures":[{{"source":0}},{{"source":1}}],` +
+        `"images":[{{"uri":"data:image/png;base64,%s"}},{{"uri":"tiny%%20tex.png"}}],` +
+        `"accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},` +
+        `{{"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}}],` +
+        `"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36}},{{"buffer":0,"byteOffset":36,"byteLength":24}}],` +
+        `"buffers":[{{"byteLength":%d,"uri":"data:application/octet-stream;base64,%s"}}]}}`,
+        png_b64, len(bin), buf_b64)
+    defer delete(js)
+    path := "/tmp/voidengine_test_datauri/m.gltf"
+    testing.expect(t, os.write_entire_file(path, transmute([]u8)js) == nil)
+    defer os.remove(path)
+    m, ok := engine.r3d_model_load(path)
+    defer engine.r3d_model_destroy(&m)
+    testing.expect(t, ok)
+    if !ok { return }
+    testing.expect_value(t, len(m.images), 2)
+    for &im in m.images {
+        testing.expect(t, im.width == 2 && im.height == 2 && len(im.pixels) == 16)
+        if len(im.pixels) == 16 { testing.expect(t, im.pixels[0] == 255 && im.pixels[5] == 255) }
+    }
+    testing.expect(t, len(m.prims) == 1 && len(m.prims[0].vertices) == 3)
 }
