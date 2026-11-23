@@ -1,12 +1,14 @@
 package templar3d
 
 // ============================================================================
-// templar3d — Void Engine 3D-1 demo: a CC0 skinned knight (KayKit, Kay
-// Lousberg) idles, walks and runs a loop on a textured ground (CC0 Poly
-// Haven, from Templar Valley's terrain pass) under a shadowing sun with fog.
+// templar3d — Void Engine 3D-1 demo: a CC0 skinned realistic-proportion
+// king (Quaternius, Ultimate Modular Men) idles, walks and runs a loop on a
+// textured ground (CC0 Poly Haven, from Templar Valley's terrain pass) under
+// a shadowing sun with fog. (3D-1 shipped with the chibi KayKit knight,
+// still in assets/ for comparison.)
 //
 // Exercises: textured glTF (base color / normal / ORM, sRGB correct), GPU
-// skinning, clip crossfades with phase sync, joint-attached props, the
+// skinning (multi-mesh character), clip crossfades with phase sync, the
 // orbit and free-fly cameras, skinned sun shadows. OpenGL backend.
 //
 // Usage:
@@ -127,7 +129,7 @@ game_init :: proc(e: ^ve.Engine) {
     if !ok { os.exit(1) }
 
     // --- knight ---
-    g.knight, ok = ve.r3d_model_load(ASSETS + "/kaykit_knight.glb")
+    g.knight, ok = ve.r3d_model_load(ASSETS + "/quaternius_king.glb")
     if !ok { fmt.eprintln("templar3d: cannot load knight"); os.exit(1) }
     g.knight_gl = ve.gl3d_model_upload(&g.knight)
     // debug: TEMPLAR3D_HIDE=name,name hides more primitives
@@ -139,8 +141,8 @@ game_init :: proc(e: ^ve.Engine) {
         ve.gl3d_model_set_visible(&g.knight_gl, name, false)
     }
     g.clip_idle = ve.r3d_anim_find_clip(g.knight.clips[:], "Idle")
-    g.clip_walk = ve.r3d_anim_find_clip(g.knight.clips[:], "Walking_A")
-    g.clip_run  = ve.r3d_anim_find_clip(g.knight.clips[:], "Running_A")
+    g.clip_walk = ve.r3d_anim_find_clip(g.knight.clips[:], "Walk")
+    g.clip_run  = ve.r3d_anim_find_clip(g.knight.clips[:], "Run")
     ve.r3d_model_pose_init(&g.pose, &g.knight)
     ve.r3d_anim_player_init(&g.player, g.clip_idle)
     g.player.sync_phase = true
