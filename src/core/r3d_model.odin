@@ -86,6 +86,7 @@ R3D_Model_Prim :: struct {
     material: int,    // -1 = default material
     vertices: [dynamic]R3D_Skin_Vertex,
     indices:  [dynamic]u32,
+    colors:   [dynamic][4]f32, // COLOR_0 (linear RGBA), empty when absent
     bounds_min, bounds_max: [3]f32,
 }
 
@@ -113,6 +114,7 @@ r3d_model_destroy :: proc(m: ^R3D_Model) {
         delete(p.name)
         delete(p.vertices)
         delete(p.indices)
+        delete(p.colors)
     }
     delete(m.prims)
     for &mt in m.materials { delete(mt.name) }
@@ -392,7 +394,7 @@ r3d_model_add_mesh :: proc(m: ^R3D_Model, name: string, mesh: ^R3D_Mesh_Data, ma
 @(private)
 r3d_model_load_primitive :: proc(data: ^cgltf.data, p: ^cgltf.primitive) -> (prim: R3D_Model_Prim, ok: bool) {
     prim.material = p.material != nil ? int(cgltf.material_index(data, p.material)) : -1
-    pos_acc, nrm_acc, uv_acc, tan_acc, jnt_acc, wgt_acc: ^cgltf.accessor
+    pos_acc, nrm_acc, uv_acc, tan_acc, jnt_acc, wgt_acc, col_acc: ^cgltf.accessor
     for a in p.attributes {
         #partial switch a.type {
         case .position: pos_acc = a.data
@@ -401,6 +403,7 @@ r3d_model_load_primitive :: proc(data: ^cgltf.data, p: ^cgltf.primitive) -> (pri
         case .texcoord: if a.index == 0 { uv_acc = a.data }
         case .joints:   if a.index == 0 { jnt_acc = a.data }
         case .weights:  if a.index == 0 { wgt_acc = a.data }
+        case .color:    if a.index == 0 { col_acc = a.data }
         }
     }
     if pos_acc == nil { return }
@@ -422,6 +425,16 @@ r3d_model_load_primitive :: proc(data: ^cgltf.data, p: ^cgltf.primitive) -> (pri
     if tan_acc != nil {
         _ = cgltf.accessor_unpack_floats(tan_acc, raw_data(tmp), uint(n * 4))
         for i in 0 ..< n { prim.vertices[i].tangent = {tmp[i * 4], tmp[i * 4 + 1], tmp[i * 4 + 2], tmp[i * 4 + 3]} }
+    }
+    if col_acc != nil && int(col_acc.count) == n {
+        nc := int(cgltf.num_components(col_acc.type))
+        if nc == 3 || nc == 4 {
+            _ = cgltf.accessor_unpack_floats(col_acc, raw_data(tmp), uint(n * nc))
+            resize(&prim.colors, n)
+            for i in 0 ..< n {
+                prim.colors[i] = {tmp[i * nc], tmp[i * nc + 1], tmp[i * nc + 2], nc == 4 ? tmp[i * nc + 3] : 1}
+            }
+        }
     }
     if jnt_acc != nil && wgt_acc != nil {
         for i in 0 ..< n {

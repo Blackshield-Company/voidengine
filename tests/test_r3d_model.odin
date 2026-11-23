@@ -358,3 +358,37 @@ test_model_load_data_uri_images :: proc(t: ^testing.T) {
     }
     testing.expect(t, len(m.prims) == 1 && len(m.prims[0].vertices) == 3)
 }
+
+// COLOR_0 lands in prim.colors (VEC3 widened to alpha 1); meshes without it
+// keep colors empty so renderers use constant white.
+@(test)
+test_model_load_vertex_colors :: proc(t: ^testing.T) {
+    bin: [dynamic]u8
+    defer delete(bin)
+    for v in ([?]f32{0, 0, 0, 1, 0, 0, 0, 1, 0}) { glb_f32(&bin, v) }                 // positions
+    for v in ([?]f32{1, 0, 0, 0, 1, 0, 0.25, 0.5, 0.75}) { glb_f32(&bin, v) }        // colors (VEC3)
+    buf_b64, _ := base64.encode(bin[:])
+    defer delete(buf_b64)
+    js := fmt.aprintf(
+        `{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0,1]}}],"nodes":[{{"mesh":0}},{{"mesh":1}}],` +
+        `"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"COLOR_0":1}}}}]}},{{"primitives":[{{"attributes":{{"POSITION":0}}}}]}}],` +
+        `"accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},` +
+        `{{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"}}],` +
+        `"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36}},{{"buffer":0,"byteOffset":36,"byteLength":36}}],` +
+        `"buffers":[{{"byteLength":%d,"uri":"data:application/octet-stream;base64,%s"}}]}}`,
+        len(bin), buf_b64)
+    defer delete(js)
+    path := "/tmp/voidengine_test_vcolor.gltf"
+    testing.expect(t, os.write_entire_file(path, transmute([]u8)js) == nil)
+    defer os.remove(path)
+    m, ok := engine.r3d_model_load(path)
+    defer engine.r3d_model_destroy(&m)
+    testing.expect(t, ok)
+    if !ok || len(m.prims) != 2 { testing.expect(t, false, "want 2 prims"); return }
+    c := m.prims[0].colors[:]
+    testing.expect_value(t, len(c), 3)
+    if len(c) == 3 {
+        testing.expect(t, c[0] == {1, 0, 0, 1} && c[1] == {0, 1, 0, 1} && c[2] == {0.25, 0.5, 0.75, 1})
+    }
+    testing.expect_value(t, len(m.prims[1].colors), 0)
+}
