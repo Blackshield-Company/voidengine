@@ -30,6 +30,16 @@ A lightweight game engine with hot-reload, ECS, physics, audio — and now a
 - **Input Handling** — keyboard, mouse, and gamepad support
 - **Math Helpers** — `vec2`, `vec3`, `color`, `lerp`, `clamp`, `rand_range`
 
+### 2D platformer core (feat/platformer-core)
+
+- **Swept tile collision** (`collision2d.odin`) — sub-stepped AABB movement against a tile grid with solid tiles, **one-way platforms** (jump up through, drop down through) and **45° slopes**; ground snapping for walking down slopes
+- **Platformer controller** (`platformer.odin`) — acceleration, **coyote time**, **jump buffer**, **variable jump height**, heavier fall gravity
+- **2D camera** (`camera2d.odin`) — dead-zone follow, look-ahead, room bounds, seeded trauma shake, whole-pixel snapping
+- **Rooms and doors** (`rooms.odin`) — room graph, door triggers, fade-out → swap → fade-in transitions that don't bounce you back
+- **Parallax layers** (`parallax.odin`) — scroll factors, horizontal repeat, world- or screen-space
+- **Seeded RNG streams** (`rng.odin`) — xoshiro256** streams split from one seed (randomizers, dailies), seed codes from text
+- **Pixel-perfect lit 2D** — orthographic `R3D_Camera` (`ortho_height`), crisp `pixel_art` textures, and `gl3d_set_present` to render at a fixed internal resolution (e.g. 640×360) and scale it to the window by whole numbers with letterboxing (`pixel_fit`)
+
 ### 3D sprite rendering (v0.5.0 — gl3d / vk3d)
 
 Two interchangeable backends behind the same API (`src/core/r3d.odin` shared
