@@ -27,6 +27,7 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 import SDL "vendor:sdl2"
+import gl "vendor:OpenGL"
 import ve "../../src/core"
 
 ASSETS :: "examples/templar3d/assets"
@@ -120,6 +121,7 @@ game_init :: proc(e: ^ve.Engine) {
     g := cast(^Game)e.user_data
     g.r = ve.gl3d_init(e.config.width, e.config.height)
     if g.r == nil { fmt.eprintln("templar3d: gl3d_init failed"); os.exit(1) }
+    fmt.printfln("templar3d: GL renderer %s | %s", gl.GetString(gl.RENDERER), gl.GetString(gl.VERSION))
     ok: bool
     g.pbr, ok = ve.gl3d_pbr_init()
     if !ok { os.exit(1) }
