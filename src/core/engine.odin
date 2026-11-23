@@ -547,32 +547,28 @@ engine_check_hot_reload :: proc(engine: ^Engine) {
 engine_reload_game_code :: proc(engine: ^Engine, so_path: string) {
     fmt.println("[Hot Reload] Reloading game code...")
     
-    // Unload old shared library
-    if engine.game_dll != nil {
-        if engine.game_api.shutdown != nil {
-            engine.game_api.shutdown(engine)
-        }
-        dynlib.unload_library(engine.game_dll)
-        engine.game_dll = nil
-    }
-    
-    // Copy .so to a temp file to avoid locking the original on Linux
-    temp_path := strings.concatenate({so_path, ".tmp"})
+    // Load the new library before touching the old one, so a half-written or
+    // broken .so leaves the running game code in place instead of leaving
+    // game_api pointing into an unloaded library. Each reload copies to a
+    // fresh temp path: dlopen on a path that is still loaded returns the old
+    // handle.
+    temp_path := fmt.aprintf("%s.%d.tmp", so_path, time.to_unix_nanoseconds(time.now()))
     defer delete(temp_path)
     
     copy_ok := copy_file(so_path, temp_path)
     if !copy_ok {
-        fmt.eprintln("[Hot Reload] Failed to copy .so to temp path")
+        os.remove(temp_path)
+        fmt.eprintln("[Hot Reload] Failed to copy .so to temp path; keeping the current game code")
         return
     }
     
-    // Load new shared library
     lib, ok := dynlib.load_library(temp_path)
+    // The mapping stays valid after unlink on Linux, so temp copies don't pile up.
+    os.remove(temp_path)
     if !ok {
-        fmt.eprintln("[Hot Reload] Failed to load game .so:", dynlib.last_error())
+        fmt.eprintln("[Hot Reload] Failed to load game .so:", dynlib.last_error(), "- keeping the current game code")
         return
     }
-    engine.game_dll = lib
     
     // Load symbols individually via dynlib.symbol_address
     api := GameAPI{}
@@ -593,6 +589,14 @@ engine_reload_game_code :: proc(engine: ^Engine, so_path: string) {
         api.handle_event = (proc(^Engine, ^SDL.Event) -> bool)(sym)
     }
     
+    // Swap: shut down and unload the old library only now that the new one loaded
+    if engine.game_dll != nil {
+        if engine.game_api.shutdown != nil {
+            engine.game_api.shutdown(engine)
+        }
+        dynlib.unload_library(engine.game_dll)
+    }
+    engine.game_dll = lib
     engine.game_api = api
     
     // Call init if present
