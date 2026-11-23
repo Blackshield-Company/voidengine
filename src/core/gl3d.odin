@@ -80,6 +80,7 @@ GL3D_Renderer :: struct {
     bloom_threshold:    f32,
     exposure:           f32,
     saturation:         f32, // grade: 1 = untouched, 0 = grayscale
+    tonemap:            i32, // 0: 1 - exp(-x) (default), 1: ACES fit
     grain:              f32, // grade: film grain amount (0 = off)
     frame_num:          f32, // monotonically increasing; drives grain animation
     vignette:           f32,
@@ -432,13 +433,19 @@ uniform float u_vignette;
 uniform float u_saturation;
 uniform float u_grain;
 uniform float u_frame;
+uniform int   u_tonemap; // 0: 1 - exp(-x), 1: ACES (Narkowicz fit)
 out vec4 frag_color;
 void main() {
     vec3 c = texture(u_scene, v_uv).rgb;
     if (u_bloom_enabled > 0.5) {
         c += texture(u_bloom, v_uv).rgb * u_bloom_strength;
     }
-    c = vec3(1.0) - exp(-c * u_exposure);          // filmic-ish tonemap
+    if (u_tonemap == 1) {
+        vec3 x = c * u_exposure;
+        c = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+    } else {
+        c = vec3(1.0) - exp(-c * u_exposure);      // filmic-ish tonemap
+    }
     vec2 d = v_uv - 0.5;
     c *= 1.0 - u_vignette * dot(d, d);              // vignette
     float lum = dot(c, vec3(0.299, 0.587, 0.114));  // grade: saturation
@@ -1109,6 +1116,7 @@ gl3d_end_frame :: proc(r: ^GL3D_Renderer) {
     gl.Uniform1f(gl.GetUniformLocation(r.composite_prog, "u_exposure"), r.exposure)
     gl.Uniform1f(gl.GetUniformLocation(r.composite_prog, "u_vignette"), r.vignette)
     gl.Uniform1f(gl.GetUniformLocation(r.composite_prog, "u_saturation"), r.saturation)
+    gl.Uniform1i(gl.GetUniformLocation(r.composite_prog, "u_tonemap"), r.tonemap)
     gl.Uniform1f(gl.GetUniformLocation(r.composite_prog, "u_grain"), r.grain)
     gl.Uniform1f(gl.GetUniformLocation(r.composite_prog, "u_frame"), r.frame_num)
     gl.ActiveTexture(gl.TEXTURE0)
