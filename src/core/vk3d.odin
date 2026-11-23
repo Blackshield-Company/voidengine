@@ -1864,17 +1864,19 @@ vk3d_load_texture :: proc(r: ^VK3D_Renderer, path: string, repeat := false) -> (
     src := img.pixels.buf[:]
 
     rgba: []u8
+    expanded := false
+    defer if expanded { delete(rgba) }
     if img.channels == 4 {
         rgba = src
     } else if img.channels == 3 {
         rgba = make([]u8, w * h * 4)
+        expanded = true
         for i in 0 ..< int(w * h) {
             rgba[i * 4 + 0] = src[i * 3 + 0]
             rgba[i * 4 + 1] = src[i * 3 + 1]
             rgba[i * 4 + 2] = src[i * 3 + 2]
             rgba[i * 4 + 3] = 255
         }
-        defer delete(rgba)
     } else {
         fmt.eprintln("vk3d: unsupported channel count in:", path)
         return {}, 0, 0, false

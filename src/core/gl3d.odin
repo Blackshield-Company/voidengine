@@ -805,11 +805,16 @@ gl3d_shutdown :: proc(r: ^GL3D_Renderer) {
 //
 // pixel_art = true keeps texels crisp: nearest filtering, no mipmaps, no
 // anisotropy (use it for pixel-art sprites, tiles and their normal maps).
-gl3d_upload_texture :: proc(pixels: []u8, w, h: i32, repeat := false, pixel_art := false) -> u32 {
+//
+// srgb = true stores color art as sRGB so the GPU linearizes it before
+// lighting (the composite pass re-applies gamma): authored palette colors
+// come out as drawn under neutral light. Never use it for normal maps.
+gl3d_upload_texture :: proc(pixels: []u8, w, h: i32, repeat := false, pixel_art := false, srgb := false) -> u32 {
     tex: u32
     gl.GenTextures(1, &tex)
     gl.BindTexture(gl.TEXTURE_2D, tex)
-    gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, raw_data(pixels))
+    internal: i32 = srgb ? gl.SRGB8_ALPHA8 : gl.RGBA8
+    gl.TexImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, raw_data(pixels))
     if pixel_art {
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
@@ -829,7 +834,7 @@ gl3d_upload_texture :: proc(pixels: []u8, w, h: i32, repeat := false, pixel_art 
 }
 
 // Load a PNG (or other image format) from disk as an RGBA8 texture.
-gl3d_load_texture :: proc(path: string, repeat := false, pixel_art := false) -> (tex: u32, w, h: i32, ok: bool) {
+gl3d_load_texture :: proc(path: string, repeat := false, pixel_art := false, srgb := false) -> (tex: u32, w, h: i32, ok: bool) {
     data, read_err := os.read_entire_file_from_path(path, context.allocator)
     if read_err != nil {
         fmt.eprintln("gl3d: cannot read texture file:", path)
@@ -847,23 +852,25 @@ gl3d_load_texture :: proc(path: string, repeat := false, pixel_art := false) -> 
     src := img.pixels.buf[:]
 
     rgba: []u8
+    expanded := false
+    defer if expanded { delete(rgba) }
     if img.channels == 4 {
         rgba = src
     } else if img.channels == 3 {
         rgba = make([]u8, w * h * 4)
+        expanded = true
         for i in 0 ..< int(w * h) {
             rgba[i * 4 + 0] = src[i * 3 + 0]
             rgba[i * 4 + 1] = src[i * 3 + 1]
             rgba[i * 4 + 2] = src[i * 3 + 2]
             rgba[i * 4 + 3] = 255
         }
-        defer delete(rgba)
     } else {
         fmt.eprintln("gl3d: unsupported channel count in:", path)
         return 0, 0, 0, false
     }
 
-    tex = gl3d_upload_texture(rgba, w, h, repeat, pixel_art)
+    tex = gl3d_upload_texture(rgba, w, h, repeat, pixel_art, srgb)
     return tex, w, h, true
 }
 
