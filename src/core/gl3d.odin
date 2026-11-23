@@ -99,6 +99,15 @@ GL3D_Renderer :: struct {
     sky_prog:           u32,
     sky_vao:            u32,
     line_vbo:           u32,
+
+    // pixel-perfect present (2D): when present_w/h are set and differ from
+    // the internal size, the frame is composited at internal resolution into
+    // an LDR target and blitted to the window at the largest integer scale
+    // that fits, letterboxed, with nearest sampling (see pixel_fit).
+    present_w, present_h: i32,
+    ldr_fbo:            u32,
+    ldr_tex:            u32,
+    present_fit:        Pixel_Fit,
 }
 
 // ----------------------------------------------------------------------------
@@ -737,6 +746,12 @@ gl3d_create_targets :: proc(r: ^GL3D_Renderer, w, h: i32) {
 gl3d_resize :: proc(r: ^GL3D_Renderer, w, h: i32) {
     if w <= 0 || h <= 0 { return }
     gl3d_create_targets(r, w, h)
+    if r.ldr_fbo != 0 { // internal size changed: rebuild the present target
+        gl.DeleteFramebuffers(1, &r.ldr_fbo)
+        gl.DeleteTextures(1, &r.ldr_tex)
+        r.ldr_fbo, r.ldr_tex = 0, 0
+        gl3d_set_present(r, r.present_w, r.present_h)
+    }
 }
 
 gl3d_shutdown :: proc(r: ^GL3D_Renderer) {
@@ -771,6 +786,10 @@ gl3d_shutdown :: proc(r: ^GL3D_Renderer) {
     gl.DeleteProgram(r.sky_prog)
     gl.DeleteVertexArrays(1, &r.sky_vao)
     gl.DeleteBuffers(1, &r.line_vbo)
+    if r.ldr_fbo != 0 {
+        gl.DeleteFramebuffers(1, &r.ldr_fbo)
+        gl.DeleteTextures(1, &r.ldr_tex)
+    }
     delete(r.lines)
     delete(r.instances)
     delete(r.lights)
@@ -783,11 +802,22 @@ gl3d_shutdown :: proc(r: ^GL3D_Renderer) {
 
 // Upload raw RGBA8 pixels as a texture. repeat enables tiling (for uv_rect
 // values > 1); mipmaps are generated for minification quality.
-gl3d_upload_texture :: proc(pixels: []u8, w, h: i32, repeat := false) -> u32 {
+//
+// pixel_art = true keeps texels crisp: nearest filtering, no mipmaps, no
+// anisotropy (use it for pixel-art sprites, tiles and their normal maps).
+gl3d_upload_texture :: proc(pixels: []u8, w, h: i32, repeat := false, pixel_art := false) -> u32 {
     tex: u32
     gl.GenTextures(1, &tex)
     gl.BindTexture(gl.TEXTURE_2D, tex)
     gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, raw_data(pixels))
+    if pixel_art {
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+        wrap_pa: i32 = repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap_pa)
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap_pa)
+        return tex
+    }
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR)
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
     wrap: i32 = repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE
@@ -799,7 +829,7 @@ gl3d_upload_texture :: proc(pixels: []u8, w, h: i32, repeat := false) -> u32 {
 }
 
 // Load a PNG (or other image format) from disk as an RGBA8 texture.
-gl3d_load_texture :: proc(path: string, repeat := false) -> (tex: u32, w, h: i32, ok: bool) {
+gl3d_load_texture :: proc(path: string, repeat := false, pixel_art := false) -> (tex: u32, w, h: i32, ok: bool) {
     data, read_err := os.read_entire_file_from_path(path, context.allocator)
     if read_err != nil {
         fmt.eprintln("gl3d: cannot read texture file:", path)
@@ -833,7 +863,7 @@ gl3d_load_texture :: proc(path: string, repeat := false) -> (tex: u32, w, h: i32
         return 0, 0, 0, false
     }
 
-    tex = gl3d_upload_texture(rgba, w, h, repeat)
+    tex = gl3d_upload_texture(rgba, w, h, repeat, pixel_art)
     return tex, w, h, true
 }
 
@@ -1062,8 +1092,9 @@ gl3d_end_frame :: proc(r: ^GL3D_Renderer) {
         src = r.blur_tex[dst]
     }
 
-    // composite to screen
-    gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
+    // composite to screen (or to the LDR target when presenting pixel-perfect)
+    presenting := gl3d_presenting(r)
+    gl.BindFramebuffer(gl.FRAMEBUFFER, presenting ? r.ldr_fbo : 0)
     gl.Viewport(0, 0, r.width, r.height)
     gl.UseProgram(r.composite_prog)
     gl.Uniform1f(gl.GetUniformLocation(r.composite_prog, "u_bloom_enabled"), r.bloom ? 1.0 : 0.0)
@@ -1079,6 +1110,60 @@ gl3d_end_frame :: proc(r: ^GL3D_Renderer) {
     gl.BindTexture(gl.TEXTURE_2D, src)
     gl3d_draw_fullscreen(r)
     gl.ActiveTexture(gl.TEXTURE0)
+
+    if presenting {
+        fit := r.present_fit
+        gl.BindFramebuffer(gl.READ_FRAMEBUFFER, r.ldr_fbo)
+        gl.BindFramebuffer(gl.DRAW_FRAMEBUFFER, 0)
+        gl.Viewport(0, 0, r.present_w, r.present_h)
+        gl.ClearColor(0, 0, 0, 1)
+        gl.Clear(gl.COLOR_BUFFER_BIT)
+        // GL's origin is bottom-left; pixel_fit's y is from the top.
+        y0 := r.present_h - fit.y - fit.h
+        gl.BlitFramebuffer(0, 0, r.width, r.height,
+                           fit.x, y0, fit.x + fit.w, y0 + fit.h,
+                           gl.COLOR_BUFFER_BIT, gl.NEAREST)
+        gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
+    }
+}
+
+@(private)
+gl3d_presenting :: proc(r: ^GL3D_Renderer) -> bool {
+    return r.ldr_fbo != 0 && r.present_w > 0 && r.present_h > 0 &&
+           (r.present_w != r.width || r.present_h != r.height)
+}
+
+// Present the internal-resolution frame pixel-perfect into a window of
+// win_w x win_h: largest integer scale that fits, centered, black bars.
+// Call once after gl3d_init and again whenever the window resizes. Pass the
+// internal size (or 0, 0) to draw straight to the window again.
+gl3d_set_present :: proc(r: ^GL3D_Renderer, win_w, win_h: i32) {
+    r.present_w, r.present_h = win_w, win_h
+    r.present_fit = pixel_fit(win_w, win_h, r.width, r.height)
+    if r.ldr_fbo == 0 {
+        gl.GenTextures(1, &r.ldr_tex)
+        gl.BindTexture(gl.TEXTURE_2D, r.ldr_tex)
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, r.width, r.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, nil)
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+        gl.GenFramebuffers(1, &r.ldr_fbo)
+        gl.BindFramebuffer(gl.FRAMEBUFFER, r.ldr_fbo)
+        gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, r.ldr_tex, 0)
+        if gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE {
+            fmt.eprintln("gl3d: present framebuffer incomplete")
+        }
+        gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
+    }
+}
+
+// Read the internal-resolution frame (width x height, bottom row first).
+// Works with or without pixel-perfect present; call after end_frame.
+gl3d_read_internal :: proc(r: ^GL3D_Renderer, pixels: []u8) {
+    gl.BindFramebuffer(gl.FRAMEBUFFER, gl3d_presenting(r) ? r.ldr_fbo : 0)
+    gl.ReadPixels(0, 0, r.width, r.height, gl.RGBA, gl.UNSIGNED_BYTE, raw_data(pixels))
+    gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
 }
 
 // Read the back buffer (call between end_frame and the window swap).

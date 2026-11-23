@@ -32,6 +32,10 @@ R3D_Camera :: struct {
     fov_y:    f32, // radians
     near_z:   f32,
     far_z:    f32,
+    // Orthographic mode (2D games): when > 0 the camera projects an ortho box
+    // ortho_height world units tall (width = height * aspect), centered on
+    // position, instead of using fov_y. 0 keeps the perspective camera.
+    ortho_height: f32,
 }
 
 // Point light. color is linear HDR intensity (values > 1 feed bloom).
@@ -277,8 +281,18 @@ r3d_perspective_vk :: proc "contextless" (fov_y, aspect, near_z, far_z: f32) -> 
 r3d_camera_view_proj :: proc "contextless" (cam: ^R3D_Camera, aspect: f32, vulkan: bool) -> linalg.Matrix4f32 {
     _, _, forward := r3d_camera_basis(cam)
     view := linalg.matrix4_look_at(cam.position, cam.position + forward, linalg.Vector3f32{0, 1, 0})
-    proj := vulkan ? r3d_perspective_vk(cam.fov_y, aspect, cam.near_z, cam.far_z) :
-                     r3d_perspective_gl(cam.fov_y, aspect, cam.near_z, cam.far_z)
+    proj: linalg.Matrix4f32
+    if cam.ortho_height > 0 {
+        hh := cam.ortho_height * 0.5
+        hw := hh * aspect
+        near_z := cam.near_z
+        far_z  := cam.far_z > near_z ? cam.far_z : near_z + 1000
+        proj = vulkan ? r3d_ortho_vk(-hw, hw, -hh, hh, near_z, far_z) :
+                        r3d_ortho_gl(-hw, hw, -hh, hh, near_z, far_z)
+    } else {
+        proj = vulkan ? r3d_perspective_vk(cam.fov_y, aspect, cam.near_z, cam.far_z) :
+                        r3d_perspective_gl(cam.fov_y, aspect, cam.near_z, cam.far_z)
+    }
     return proj * view
 }
 
