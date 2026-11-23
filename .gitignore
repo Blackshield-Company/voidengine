@@ -13,6 +13,7 @@
 /shmup-test
 /demo-test
 /puzzle-test
+/templar_valley
 
 # Odin artifacts
 *.o

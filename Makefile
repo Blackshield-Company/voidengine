@@ -4,11 +4,11 @@
 ODIN := odin
 OUT_DIR := .
 
-.PHONY: all build shmup demo puzzle void3d templar3d shared check test clean run run-demo run-puzzle run-void3d run-void3d-vk run-templar3d vk-shaders
+.PHONY: all build shmup demo puzzle void3d templar3d templar_valley shared check test clean run run-demo run-puzzle run-void3d run-void3d-vk run-templar3d run-templar_valley vk-shaders
 
 all: build
 
-build: shmup demo puzzle void3d templar3d
+build: shmup demo puzzle void3d templar3d templar_valley
 
 shmup:
 	$(ODIN) build examples/shmup -out:$(OUT_DIR)/shmup -debug
@@ -24,6 +24,9 @@ void3d: vk-shaders
 
 templar3d:
 	$(ODIN) build examples/templar3d -out:$(OUT_DIR)/templar3d -debug
+
+templar_valley:
+	$(ODIN) build examples/templar_valley -out:$(OUT_DIR)/templar_valley -o:speed
 
 vk-shaders:
 	@mkdir -p examples/void3d/assets/shaders
@@ -42,13 +45,14 @@ check:
 	$(ODIN) check examples/puzzle -no-entry-point
 	$(ODIN) check examples/void3d -no-entry-point
 	$(ODIN) check examples/templar3d -no-entry-point
+	$(ODIN) check examples/templar_valley -no-entry-point
 
 test:
 	@echo "Running engine tests..."
 	$(ODIN) test tests/ -out:$(OUT_DIR)/voidengine-test
 
 clean:
-	rm -f shmup demo puzzle void3d templar3d voidengine.so voidengine-test
+	rm -f shmup demo puzzle void3d templar3d templar_valley voidengine.so voidengine-test
 
 run: shmup
 	./shmup
@@ -64,6 +68,9 @@ run-void3d: void3d
 
 run-templar3d: templar3d
 	./templar3d
+
+run-templar_valley: templar_valley
+	./templar_valley
 
 run-void3d-vk: void3d
 	./void3d --backend vk
