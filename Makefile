@@ -4,7 +4,7 @@
 ODIN := odin
 OUT_DIR := .
 
-.PHONY: all build shmup demo puzzle void3d templar3d templar_valley shared check test clean run run-demo run-puzzle run-void3d run-void3d-vk run-templar3d run-templar_valley vk-shaders
+.PHONY: all build shmup demo puzzle void3d templar3d templar_valley shared check test clean run run-demo run-puzzle run-void3d run-void3d-vk run-templar3d run-templar_valley onfoot-fixture vk-shaders
 
 all: build
 
@@ -46,6 +46,7 @@ check:
 	$(ODIN) check examples/void3d -no-entry-point
 	$(ODIN) check examples/templar3d -no-entry-point
 	$(ODIN) check examples/templar_valley -no-entry-point
+	$(ODIN) check examples/templar_valley/onfoot -no-entry-point
 
 test:
 	@echo "Running engine tests..."
@@ -71,6 +72,10 @@ run-templar3d: templar3d
 
 run-templar_valley: templar_valley
 	./templar_valley
+
+# 3D-3 on-foot T-PARITY routes, headless (valley route needs fetched assets)
+onfoot-fixture: templar_valley
+	./templar_valley --fixture all
 
 run-void3d-vk: void3d
 	./void3d --backend vk

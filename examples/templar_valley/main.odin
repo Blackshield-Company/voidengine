@@ -9,11 +9,16 @@ package templar_valley
 //
 // Usage:
 //   templar_valley [--size WxH] [--ssaa N] [--shots DIR] [--bench N] [--bench-pitch DEG]
+//                  [--onfoot] [--bench-onfoot N] [--fixture ROUTE|all [--csv DIR]]
+//                  [--fixture-shots DIR]
 //   --shots DIR   render the look-test shots (same camera poses as the Godot
 //                 review shots) as PPM into DIR, then exit
 //   --bench N     ride the east spur road for N frames with the riding camera,
 //                 print frame-time stats (glFinish per frame), exit
 //   --ssaa N      render N x the size and box-filter the shots down
+//   3D-3 on foot (collision, controller, follow camera, occlusion): see
+//   onfoot_play.odin and fixture_scene.odin for --onfoot, --bench-onfoot,
+//   --fixture and --fixture-shots.
 // Controls: mouse drag = orbit, Z/X = zoom, F = free-fly (WASD QE, Shift),
 //           1/2/3 = horse halt/walk/trot (rides east), Esc = quit
 // Assets: python3 examples/templar_valley/tools/fetch_assets.py then
@@ -145,6 +150,18 @@ Game :: struct {
     deterministic: bool,
     last_ns:   i64,
     stats:     Draw_Stats,
+
+    // 3D-3 on foot
+    headless:      bool, // CPU only (--fixture): no GL uploads
+    of:            Onfoot,
+    of_t0:         i64,
+    onfoot_mode:   bool,
+    bench_onfoot:  int,
+    use_feet:      bool, // rider model at feet_y (controller) not the terrain
+    feet_y:        f32,
+    fixture_shots: string,
+    fxs:           Fx_Scene,
+    exit_code:     int,
 }
 
 PROP_CELL :: f32(64)
@@ -181,7 +198,7 @@ load_asset :: proc(g: ^Game, name: string, path: string) -> int {
     ok: bool
     a.model, ok = ve.r3d_model_load(path)
     if !ok { fmt.eprintln("templar_valley: cannot load", path, "(run tools/fetch_assets.py)"); os.exit(1) }
-    a.gl = ve.gl3d_model_upload(&a.model)
+    if !g.headless { a.gl = ve.gl3d_model_upload(&a.model) }
     ve.r3d_model_pose_init(&a.pose, &a.model)
     a.bmin = {max(f32), max(f32), max(f32)}
     a.bmax = {min(f32), min(f32), min(f32)}
@@ -195,7 +212,7 @@ load_asset :: proc(g: ^Game, name: string, path: string) -> int {
             a.bmax = linalg.max(a.bmax, w)
         }
     }
-    ve.gl3d_model_enable_instancing(&g.pbr, &a.gl)
+    if !g.headless { ve.gl3d_model_enable_instancing(&g.pbr, &a.gl) }
     append(&g.assets, a)
     return len(g.assets) - 1
 }
@@ -353,6 +370,12 @@ game_init :: proc(e: ^ve.Engine) {
     if !ok { os.exit(1) }
     if !ve.gl3d_env_init(&g.env, 2048) { os.exit(1) }
     ve.gl3d_pbr_use_env(&g.pbr, &g.env)
+    if len(g.fixture_shots) > 0 {
+        setup_lighting(g)
+        g.cam = ve.R3D_Camera{fov_y = math.to_radians(CAMERA_FOV_DEG), near_z = 0.2, far_z = 3000}
+        fx_scene_init(g)
+        return
+    }
 
     t0 := time.tick_now()
     valley_init(&g.valley)
@@ -428,6 +451,21 @@ game_init :: proc(e: ^ve.Engine) {
     ve.r3d_anim_player_init(&g.horse_player, g.clip_horse_walk)
     fmt.printfln("templar_valley: rider scale %.3f (hips %v), horse scale %.3f (back %.2f)", g.king_scale, g.king_hips, g.horse_scale, back_y)
 
+    setup_lighting(g)
+
+    g.orbit = ve.r3d_orbit_camera_default()
+    g.orbit.want_dist = 12
+    g.orbit.want_pitch = math.to_radians(f32(30))
+    g.fly = ve.r3d_fly_camera_default()
+    g.cam = ve.R3D_Camera{fov_y = math.to_radians(CAMERA_FOV_DEG), near_z = 0.2, far_z = 3000}
+    g.pos = {100, -562}
+    g.mounted = true
+    g.gait = 2
+    g.follow = g.deterministic
+    if g.onfoot_mode || g.bench_onfoot > 0 { onfoot_start(g) }
+}
+
+setup_lighting :: proc(g: ^Game) {
     // light: Godot's Sun, rotation_degrees (-55, -30, 0): travels along
     // Basis(euler YXZ) * -Z = (0.287, -0.819, -0.497), 55 deg up.
     ve.gl3d_set_sun(g.r, ve.R3D_Sun{
@@ -456,16 +494,6 @@ game_init :: proc(e: ^ve.Engine) {
     g.r.vignette = 0.18
     g.r.saturation = 1.12
     g.r.grain = 0.0
-
-    g.orbit = ve.r3d_orbit_camera_default()
-    g.orbit.want_dist = 12
-    g.orbit.want_pitch = math.to_radians(f32(30))
-    g.fly = ve.r3d_fly_camera_default()
-    g.cam = ve.R3D_Camera{fov_y = math.to_radians(CAMERA_FOV_DEG), near_z = 0.2, far_z = 3000}
-    g.pos = {100, -562}
-    g.mounted = true
-    g.gait = 2
-    g.follow = g.deterministic
 }
 
 apply_model_rotation :: proc(m: ^ve.R3D_Model, pose: ^ve.R3D_Model_Pose, joint: int, axis: [3]f32, angle: f32) {
@@ -515,7 +543,8 @@ horse_matrix :: proc(g: ^Game) -> linalg.Matrix4f32 {
 rider_matrix :: proc(g: ^Game) -> linalg.Matrix4f32 {
     hm := horse_matrix(g)
     if !g.mounted {
-        return yaw_scale_matrix(ground_pos(g, g.pos), math.PI / 2 - g.heading, {g.king_scale, g.king_scale, g.king_scale})
+        feet := g.use_feet ? [3]f32{g.pos.x, g.feet_y, g.pos.y} : ground_pos(g, g.pos)
+        return yaw_scale_matrix(feet, math.PI / 2 - g.heading, {g.king_scale, g.king_scale, g.king_scale})
     }
     back := [3]f32{0, HORSE_BACK_HEIGHT / g.horse_scale, 0}
     if g.horse_back_node >= 0 { back = ve.r3d_mat4_transform_point(g.horse_pose.global[g.horse_back_node], {0, 0, 0}) }
@@ -570,6 +599,7 @@ draw_world :: proc(g: ^Game) {
     fr := ve.r3d_frustum_from_matrix(vp, true)
     focus := ground_pos(g, g.pos)
     update_grass(g, focus)
+    clear(&g.of.faded)
 
     // gather instances for the camera
     for a in g.assets { clear(&a.inst) }
@@ -583,6 +613,9 @@ draw_world :: proc(g: ^Game) {
             d := linalg.length(p.center - eye) - p.radius
             rng := p.kind == 't' ? TREE_RANGE : (p.kind == 'b' ? BUILDING_RANGE : CLUTTER_RANGE)
             if d > rng || !ve.r3d_frustum_sphere(&fr, p.center, p.radius) { continue }
+            if g.of.active {
+                if a := prop_alpha(g, int(pi)); a < 0.99 { append(&g.of.faded, Faded{pi, a}); continue }
+            }
             append(&g.assets[p.asset].inst, p.mat)
             switch p.kind { case 't': g.stats.trees += 1; case 'b': g.stats.buildings += 1; case 'c': g.stats.clutter += 1 }
         }
@@ -630,7 +663,7 @@ draw_world :: proc(g: ^Game) {
             if ai == g.king || ai == g.horse { continue }
             ve.gl3d_pbr_draw_model_shadow_instanced(&g.pbr, &g.assets[ai].gl, &g.assets[ai].pose, g.shadow_lists[ai][:])
         }
-        ve.gl3d_pbr_draw_model_shadow(r, &g.pbr, &g.assets[g.horse].gl, &g.horse_pose, hm)
+        if g.mounted { ve.gl3d_pbr_draw_model_shadow(r, &g.pbr, &g.assets[g.horse].gl, &g.horse_pose, hm) }
         ve.gl3d_pbr_draw_model_shadow(r, &g.pbr, &g.assets[g.king].gl, &g.king_pose, rm)
     }
     ve.gl3d_env_shadow_end(r)
@@ -646,8 +679,9 @@ draw_world :: proc(g: ^Game) {
         a := g.assets[ai]
         ve.gl3d_pbr_draw_model_instanced(r, &g.pbr, &a.gl, &a.pose, a.inst[:])
     }
-    ve.gl3d_pbr_draw_model(r, &g.pbr, &g.assets[g.horse].gl, &g.horse_pose, hm)
+    if g.mounted { ve.gl3d_pbr_draw_model(r, &g.pbr, &g.assets[g.horse].gl, &g.horse_pose, hm) }
     ve.gl3d_pbr_draw_model(r, &g.pbr, &g.assets[g.king].gl, &g.king_pose, rm)
+    draw_faded_props(g)
     ve.gl3d_end_frame(r)
 }
 
@@ -657,6 +691,16 @@ game_render :: proc(e: ^ve.Engine, _: ^SDL.Renderer) {
     g := cast(^Game)e.user_data
     in_ := &e.input
     dt: f32 = 1.0 / 60
+    if len(g.fixture_shots) > 0 {
+        if !fixture_shots_run(g) { g.exit_code = 1 }
+        e.running = false
+        return
+    }
+    if g.bench_onfoot > 0 {
+        onfoot_bench(g)
+        e.running = false
+        return
+    }
     if !g.deterministic {
         now := time.tick_now()._nsec
         if g.last_ns != 0 { dt = clamp(f32(now - g.last_ns) / 1e9, 0, 0.1) }
@@ -715,6 +759,8 @@ game_render :: proc(e: ^ve.Engine, _: ^SDL.Renderer) {
         step_sim(g, dt)
         ls := Look_Shot{mounted = true, yaw_deg = 0, pitch_deg = g.bench_pitch, zoom = 8, ahead = 1.5}
         follow_camera(g, &ls)
+    } else if g.of.active {
+        onfoot_interactive(g, dt)
     } else {
         g.follow = false
         step_sim(g, dt)
@@ -792,6 +838,14 @@ save_ppm :: proc(g: ^Game, path: string) {
 
 game_shutdown :: proc(e: ^ve.Engine) {
     g := cast(^Game)e.user_data
+    if len(g.fixture_shots) > 0 {
+        fx_scene_destroy(g)
+        ve.gl3d_env_destroy(&g.env)
+        ve.gl3d_pbr_destroy(&g.pbr)
+        ve.gl3d_shutdown(g.r)
+        return
+    }
+    if g.of.active { destroy_valley_onfoot(g) }
     for a in g.assets {
         ve.gl3d_model_destroy(&a.gl)
         ve.r3d_model_pose_destroy(&a.pose)
@@ -831,6 +885,7 @@ main :: proc() {
     g.ssaa = 1
     g.bench_pitch = 25
     width, height: i32 = 1280, 720
+    fixture_route, csv_dir: string
     args := os.args
     for i := 1; i < len(args); i += 1 {
         switch {
@@ -840,6 +895,16 @@ main :: proc() {
             i += 1; g.bench, _ = strconv.parse_int(args[i]); g.deterministic = true
         case args[i] == "--bench-pitch" && i + 1 < len(args):
             i += 1; g.bench_pitch, _ = strconv.parse_f32(args[i])
+        case args[i] == "--fixture" && i + 1 < len(args):
+            i += 1; fixture_route = args[i]
+        case args[i] == "--csv" && i + 1 < len(args):
+            i += 1; csv_dir = args[i]
+        case args[i] == "--fixture-shots" && i + 1 < len(args):
+            i += 1; g.fixture_shots = args[i]; g.deterministic = true
+        case args[i] == "--onfoot":
+            g.onfoot_mode = true
+        case args[i] == "--bench-onfoot" && i + 1 < len(args):
+            i += 1; g.bench_onfoot, _ = strconv.parse_int(args[i]); g.deterministic = true
         case args[i] == "--ssaa" && i + 1 < len(args):
             i += 1; g.ssaa, _ = strconv.parse_int(args[i]); g.ssaa = clamp(g.ssaa, 1, 4)
         case args[i] == "--size" && i + 1 < len(args):
@@ -851,11 +916,14 @@ main :: proc() {
             }
         }
     }
-    if len(g.shots_dir) > 0 { os.make_directory(g.shots_dir) } else { g.ssaa = 1 }
+    if len(fixture_route) > 0 { os.exit(run_fixture_headless(g, fixture_route, csv_dir)) }
+    if len(g.shots_dir) > 0 { os.make_directory(g.shots_dir) }
+    else if len(g.fixture_shots) > 0 { os.make_directory(g.fixture_shots) }
+    else { g.ssaa = 1 }
     width *= i32(g.ssaa)
     height *= i32(g.ssaa)
     config := ve.EngineConfig{
-        title = "templar_valley — Void Engine 3D-2 (terrain, sky, CSM)",
+        title = "templar_valley — Void Engine 3D-3 (terrain, sky, CSM, on foot)",
         width = width, height = height,
         target_fps = g.deterministic ? 1000.0 : 240.0,
         enable_hot_reload = false,
@@ -873,4 +941,5 @@ main :: proc() {
         shutdown = game_shutdown, handle_event = game_handle_event,
     }
     ve.engine_run(e)
+    if g.exit_code != 0 { os.exit(g.exit_code) }
 }
