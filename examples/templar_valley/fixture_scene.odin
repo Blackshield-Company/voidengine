@@ -147,15 +147,15 @@ draw_fx_scene :: proc(g: ^Game, r: ^onfoot.Run, side: bool) {
         hz := linalg.normalize([2]f32{boom.x, boom.z} + {1e-4, 0})
         sidev := [2]f32{-hz.y, hz.x}
         eye := c.pivot + [3]f32{sidev.x * 9, 3.5, sidev.y * 9}
-        search: for dist in ([]f32{9, 7, 5, 3.5}) {
+        search: for dist in ([]f32{10, 8, 6, 4}) {
             for sgn in ([]f32{1, -1}) {
-                e := c.pivot + [3]f32{(sidev.x * sgn + hz.x * 0.35) * dist, 0.4 * dist, (sidev.y * sgn + hz.y * 0.35) * dist}
+                e := c.pivot + [3]f32{(sidev.x * sgn - hz.x * 0.6) * dist, 0.5 * dist, (sidev.y * sgn - hz.y * 0.6) * dist}
                 d := c.pivot - e
                 l := linalg.length(d)
                 if _, _, hit := ve.r3d_raycast(&sc.fx.world, e, d / l, l, ve.R3D_COL_PLAYER | ve.R3D_COL_CAMERA); !hit { eye = e; break search }
             }
         }
-        focus := c.pivot + linalg.normalize(boom) * min(linalg.length(boom), 6) * 0.3 - {0, 0.5, 0}
+        focus := c.pivot + linalg.normalize(boom) * min(linalg.length(boom), 6) * 0.25 - {0, 0.4, 0}
         d := focus - eye
         g.cam.position = eye
         g.cam.yaw = math.atan2(d.x, -d.z)
