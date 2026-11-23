@@ -141,13 +141,21 @@ draw_fx_scene :: proc(g: ^Game, r: ^onfoot.Run, side: bool) {
     want := c.pivot + ve.r3d_follow_boom_direction(ve.r3d_follow_displayed_yaw(c), c.pitch_deg) * c.zoom_current
     actual := g.cam.position
     if side {
-        // look at the player from the side of the boom, a little above
-        boom := actual - c.pivot
+        // look at the player from beside the boom, from a spot with a clear
+        // line of sight to the pivot
+        boom := want - c.pivot
         hz := linalg.normalize([2]f32{boom.x, boom.z} + {1e-4, 0})
         sidev := [2]f32{-hz.y, hz.x}
-        focus := (c.pivot + want) * 0.5
-        dist := max(linalg.length(want - c.pivot) * 0.9, 9)
-        eye := focus + [3]f32{sidev.x, 0, sidev.y} * dist + {0, 2, 0}
+        eye := c.pivot + [3]f32{sidev.x * 9, 3.5, sidev.y * 9}
+        search: for dist in ([]f32{9, 7, 5, 3.5}) {
+            for sgn in ([]f32{1, -1}) {
+                e := c.pivot + [3]f32{(sidev.x * sgn + hz.x * 0.35) * dist, 0.4 * dist, (sidev.y * sgn + hz.y * 0.35) * dist}
+                d := c.pivot - e
+                l := linalg.length(d)
+                if _, _, hit := ve.r3d_raycast(&sc.fx.world, e, d / l, l, ve.R3D_COL_PLAYER | ve.R3D_COL_CAMERA); !hit { eye = e; break search }
+            }
+        }
+        focus := c.pivot + linalg.normalize(boom) * min(linalg.length(boom), 6) * 0.3 - {0, 0.5, 0}
         d := focus - eye
         g.cam.position = eye
         g.cam.yaw = math.atan2(d.x, -d.z)
@@ -200,9 +208,10 @@ shot_hook :: proc(r: ^onfoot.Run, op: ^onfoot.Op) -> bool {
         save_ppm(g, fmt.tprintf("%s/%s%s.ppm", g.fixture_shots, op.name, side ? "-side" : ""))
     }
     c := &r.cam
-    fmt.printfln("templar_valley: %s route=%s feet=(%.2f, %.2f, %.2f) on_floor=%v floor_n=%v zoom=%.1f boom=%.2f m interior=%v faded/cut=%v",
+    faded, cut := ve.r3d_occlusion_cleared_counts(&r.fx.occ)
+    fmt.printfln("templar_valley: %s route=%s feet=(%.2f, %.2f, %.2f) on_floor=%v floor_n=%v zoom=%.1f boom=%.2f m interior=%v faded=%d cut=%d",
         op.name, r.route, r.kcc.pos.x, r.kcc.pos.y, r.kcc.pos.z, r.kcc.on_floor, r.kcc.floor_n, c.zoom_current, c.effective_distance, c.interior_mode,
-        ve.r3d_occlusion_cleared_counts(&r.fx.occ))
+        faded, cut)
     g.fxs.shots += 1
     return true
 }

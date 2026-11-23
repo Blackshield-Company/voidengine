@@ -250,6 +250,8 @@ run_fixture_headless :: proc(g: ^Game, which: string, csv_dir: string) -> int {
             r.snap_every_s = 3
             r.zoom_every_s = 9
             route_valley(g, &g.of.ops)
+            fmt.printfln("  valley setup (terrain, props, colliders, slope search) %.0f ms", time.duration_milliseconds(time.tick_since(t0)))
+            t0 = time.tick_now()
             ok = onfoot.run_ops(&r, g.of.ops[:])
             if ok { judge_valley(&r) }
         } else {

@@ -222,8 +222,8 @@ route_occlusion :: proc(allocator := context.allocator) -> [dynamic]Op {
     g :: proc(lx, lz: f32, seg: string, run := false, pad := false, tol: f32 = 0.6) -> Op { return go_local(lx, lz, run, seg, pad, tol) }
     append(&ops, reset_op({-16, 0, 66}, 0, 14), idle(1, "start"))
     // yaw 0 (camera south, +z): north of the house
-    append(&ops, g(-8, 66, "to_house_e"), g(-8, 47, "to_north"), g(-16, 47, "behind_house_y0"), idle(1, "behind_house_y0_idle"))
-    append(&ops, shot("3d3-occluder-fade"))
+    append(&ops, g(-8, 66, "to_house_e"), g(-8, 47, "to_north"), g(-13.5, 47.5, "behind_house_y0"), shot("3d3-occluder-fade"))
+    append(&ops, g(-16, 47, "behind_house_y0"), idle(1, "behind_house_y0_idle"), shot("3d3-roof-cut"))
     append(&ops, g(-24, 47, "behind_house_y0", false, true))
     // yaw 4 (camera north): south of the house
     append(&ops, face(4), g(-24, 58.5, "to_south"), g(-8, 58.5, "behind_house_y4", false, true))
@@ -233,7 +233,7 @@ route_occlusion :: proc(allocator := context.allocator) -> [dynamic]Op {
     append(&ops, face(6), g(-9.5, 47.5, "to_east"), g(-9.5, 58.5, "behind_house_y6", false, true))
     // under the tree canopy and the awning at yaw 0 (run) and yaw 1 (walk)
     append(&ops, face(0), g(-6, 48, "to_canopy"), g(6, 48, "under_canopy_y0", true), g(16, 49, "under_awning_y0", true, true))
-    append(&ops, face(1), g(4, 49, "under_awning_y1"), g(-4, 48.5, "under_canopy_y1"))
+    append(&ops, face(1), g(4, 49, "under_awning_y1"), g(0.5, 48.9, "under_canopy_y1"), shot("3d3-canopy-fade"), g(-4, 48.5, "under_canopy_y1"))
     // eight-yaw tour north of the house at max zoom
     append(&ops, face(0), g(-16, 47, "to_tour"), zoom(20), snaps(8, 1, 0.8, "behind_house_tour"), zoom(14))
     // hall entries: door at x 26 on the south (+z) wall at z 60
