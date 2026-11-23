@@ -54,10 +54,14 @@ layout(location=2) in vec2  a_uv;
 layout(location=3) in vec4  a_tangent;
 layout(location=4) in uvec4 a_joints;
 layout(location=5) in vec4  a_weights;
+layout(location=6) in mat4  a_inst;   // per-instance model matrix (u_instanced)
+layout(location=10) in vec4 a_color;  // COLOR_0; constant white when the mesh has none
 layout(std140) uniform Joints { mat4 u_joint[128]; };
 uniform mat4 u_model;
 uniform int  u_skinned;
+uniform int  u_instanced;
 mat4 skin_matrix() {
+    if (u_instanced == 1) return a_inst * u_model;
     if (u_skinned == 0) return u_model;
     mat4 s = a_weights.x * u_joint[a_joints.x]
            + a_weights.y * u_joint[a_joints.y]
@@ -73,10 +77,12 @@ out vec3 v_world;
 out vec3 v_normal;
 out vec4 v_tangent;
 out vec2 v_uv;
+out vec4 v_color;
 void main() {
     mat4 m = skin_matrix();
     vec4 world = m * vec4(a_pos, 1.0);
     mat3 m3 = mat3(m);
+    v_color   = a_color;
     v_world   = world.xyz;
     v_normal  = m3 * a_normal;
     v_tangent = vec4(m3 * a_tangent.xyz, a_tangent.w);
@@ -85,11 +91,12 @@ void main() {
 }
 `
 
-GL3D_PBR_FRAG :: "#version 330 core\n" + GL3D_PBR_FRAME_BLOCK + `
+GL3D_PBR_FRAG :: "#version 330 core\n" + GL3D_PBR_FRAME_BLOCK + GL3D_ENV_BLOCK + GL3D_ENV_FUNCS + `
 in vec3 v_world;
 in vec3 v_normal;
 in vec4 v_tangent;
 in vec2 v_uv;
+in vec4 v_color;
 
 uniform sampler2D u_base_tex;   // unit 0, sRGB
 uniform sampler2D u_mr_tex;     // unit 1, linear (G rough, B metal; ORM R = AO)
@@ -104,6 +111,8 @@ uniform vec3  u_emissive;
 uniform float u_alpha_cutoff; // < 0: opaque
 uniform int   u_double_sided;
 uniform int   u_blend;
+uniform int   u_env;       // 1: outdoor lighting from gl3d_env (CSM, sky, fog)
+uniform int   u_vertex_color; // 1: multiply base color by COLOR_0 (off: many packs store wind masks there)
 
 out vec4 frag_color;
 
@@ -166,6 +175,7 @@ vec3 shade(vec3 N, vec3 V, vec3 L, vec3 albedo, float metal, float rough, vec3 f
 
 void main() {
     vec4 base = u_base_color * texture(u_base_tex, v_uv);
+    if (u_vertex_color == 1) base *= v_color;
     if (u_alpha_cutoff >= 0.0 && base.a < u_alpha_cutoff) discard;
 
     vec4  mr    = texture(u_mr_tex, v_uv);
@@ -189,6 +199,15 @@ void main() {
     vec3 V = normalize(u_camera_pos.xyz - v_world);
     vec3 albedo = base.rgb;
     vec3 f0 = mix(vec3(0.04), albedo, metal);
+    if (u_env == 1) {
+        vec3 Ng = normalize(v_normal);
+        if (u_double_sided == 1 && !gl_FrontFacing) Ng = -Ng;
+        vec3 lit_e = env_light(N, Ng, V, albedo, metal, rough, ao, v_world);
+        lit_e += u_emissive * texture(u_emis_tex, v_uv).rgb;
+        if (any(isnan(lit_e)) || any(isinf(lit_e))) lit_e = vec3(0.0);
+        frag_color = vec4(max(lit_e, vec3(0.0)), u_blend == 1 ? clamp(base.a, 0.0, 1.0) : 1.0);
+        return;
+    }
 
     vec3 lit = vec3(0.0);
     int num_lights = int(u_meta.x);
@@ -236,13 +255,22 @@ void main() {
 
 GL3D_PBR_SHADOW_VERT :: "#version 330 core\n" + GL3D_PBR_SKIN_BLOCK + `
 uniform mat4 u_light_vp;
+uniform vec2 u_uv_scale;
+out vec2 v_uv;
 void main() {
+    v_uv = a_uv * u_uv_scale;
     gl_Position = u_light_vp * skin_matrix() * vec4(a_pos, 1.0);
 }
 `
 
 GL3D_PBR_SHADOW_FRAG :: `#version 330 core
-void main() {}
+in vec2 v_uv;
+uniform sampler2D u_base_tex;
+uniform float u_alpha_cutoff; // < 0: opaque caster
+uniform vec4 u_base_color;
+void main() {
+    if (u_alpha_cutoff >= 0.0 && u_base_color.a * texture(u_base_tex, v_uv).a < u_alpha_cutoff) discard;
+}
 `
 
 GL3D_Pbr :: struct {
@@ -254,8 +282,14 @@ GL3D_Pbr :: struct {
     // uniform locations (main program)
     loc_model, loc_skinned, loc_uv_scale, loc_base_color, loc_mat, loc_emissive: i32,
     loc_alpha_cutoff, loc_double_sided, loc_blend: i32,
+    loc_instanced, loc_env: i32,
     // shadow program
     sloc_model, sloc_skinned, sloc_light_vp: i32,
+    sloc_instanced, sloc_uv_scale, sloc_alpha_cutoff, sloc_base_color: i32,
+    // instancing (gl3d_model_enable_instancing) and outdoor lighting
+    inst_vbo:        u32,
+    inst_cap:        int,
+    env:             ^GL3D_Env,
 }
 
 gl3d_pbr_init :: proc() -> (p: GL3D_Pbr, ok: bool) {
@@ -272,6 +306,7 @@ gl3d_pbr_init :: proc() -> (p: GL3D_Pbr, ok: bool) {
     }
     bind_blocks(p.prog)
     bind_blocks(p.shadow_prog)
+    gl3d_env_bind_program(p.prog)
 
     gl.UseProgram(p.prog)
     units := [?]struct{name: cstring, unit: i32}{
@@ -291,7 +326,22 @@ gl3d_pbr_init :: proc() -> (p: GL3D_Pbr, ok: bool) {
     p.sloc_model    = gl.GetUniformLocation(p.shadow_prog, "u_model")
     p.sloc_skinned  = gl.GetUniformLocation(p.shadow_prog, "u_skinned")
     p.sloc_light_vp = gl.GetUniformLocation(p.shadow_prog, "u_light_vp")
+    p.loc_instanced = gl.GetUniformLocation(p.prog, "u_instanced")
+    p.loc_env = gl.GetUniformLocation(p.prog, "u_env")
+    p.sloc_instanced = gl.GetUniformLocation(p.shadow_prog, "u_instanced")
+    p.sloc_uv_scale = gl.GetUniformLocation(p.shadow_prog, "u_uv_scale")
+    p.sloc_alpha_cutoff = gl.GetUniformLocation(p.shadow_prog, "u_alpha_cutoff")
+    p.sloc_base_color = gl.GetUniformLocation(p.shadow_prog, "u_base_color")
+    gl.UseProgram(p.shadow_prog)
+    gl.Uniform1i(gl.GetUniformLocation(p.shadow_prog, "u_base_tex"), 0)
     gl.UseProgram(0)
+
+    gl.GenBuffers(1, &p.inst_vbo)
+    gl.BindBuffer(gl.ARRAY_BUFFER, p.inst_vbo)
+    ident := linalg.MATRIX4F32_IDENTITY
+    gl.BufferData(gl.ARRAY_BUFFER, size_of(linalg.Matrix4f32), &ident, gl.STREAM_DRAW)
+    gl.BindBuffer(gl.ARRAY_BUFFER, 0)
+    p.inst_cap = 1
 
     gl.GenBuffers(1, &p.joint_ubo)
     gl.BindBuffer(gl.UNIFORM_BUFFER, p.joint_ubo)
@@ -299,9 +349,12 @@ gl3d_pbr_init :: proc() -> (p: GL3D_Pbr, ok: bool) {
     gl.BindBuffer(gl.UNIFORM_BUFFER, 0)
 
     white := [4]u8{255, 255, 255, 255}
-    p.white_tex = gl3d_upload_texture(white[:], 1, 1, true)
+    // 1x1 fallbacks without mipmaps/anisotropy: untextured meshes have
+    // constant uvs (zero derivatives), which llvmpipe's anisotropic path
+    // turns into NaN texels.
+    p.white_tex = gl3d_upload_texture(white[:], 1, 1, true, true)
     flat := [4]u8{128, 128, 255, 255}
-    p.flat_normal_tex = gl3d_upload_texture(flat[:], 1, 1, true)
+    p.flat_normal_tex = gl3d_upload_texture(flat[:], 1, 1, true, true)
     ok = true
     return
 }
@@ -310,6 +363,7 @@ gl3d_pbr_destroy :: proc(p: ^GL3D_Pbr) {
     gl.DeleteProgram(p.prog)
     gl.DeleteProgram(p.shadow_prog)
     gl.DeleteBuffers(1, &p.joint_ubo)
+    gl.DeleteBuffers(1, &p.inst_vbo)
     gl3d_destroy_texture(p.white_tex)
     gl3d_destroy_texture(p.flat_normal_tex)
     p^ = {}
@@ -317,6 +371,7 @@ gl3d_pbr_destroy :: proc(p: ^GL3D_Pbr) {
 
 GL3D_Model_Prim :: struct {
     vao, vbo, ebo: u32,
+    cbo:           u32, // COLOR_0 stream (0 = none)
     index_count:   i32,
 }
 
@@ -326,6 +381,17 @@ GL3D_Model :: struct {
     hidden:     [dynamic]bool, // per primitive
     tex_srgb:   [dynamic]u32,  // per image (0 = not uploaded in this space)
     tex_linear: [dynamic]u32,
+    instancing: bool, // per-instance matrix attributes (locations 6..9) set up
+}
+
+// Instance attributes are only enabled while an instanced draw reads them;
+// a plain draw must not fetch from the (possibly empty) instance buffer.
+@(private="file")
+gl3d_set_instance_attribs :: proc(gm: ^GL3D_Model, on: bool) {
+    if !gm.instancing { return }
+    for c in 0 ..< 4 {
+        if on { gl.EnableVertexAttribArray(u32(6 + c)) } else { gl.DisableVertexAttribArray(u32(6 + c)) }
+    }
 }
 
 // Upload all primitives and the images their materials use (color slots as
@@ -371,6 +437,13 @@ gl3d_model_upload :: proc(m: ^R3D_Model) -> (gm: GL3D_Model) {
         gl.VertexAttribIPointer(4, 4, gl.UNSIGNED_SHORT, S, offset_of(R3D_Skin_Vertex, joints))
         gl.EnableVertexAttribArray(5)
         gl.VertexAttribPointer(5, 4, gl.FLOAT, false, S, offset_of(R3D_Skin_Vertex, weights))
+        if len(p.colors) == len(p.vertices) && len(p.colors) > 0 {
+            gl.GenBuffers(1, &g.cbo)
+            gl.BindBuffer(gl.ARRAY_BUFFER, g.cbo)
+            gl.BufferData(gl.ARRAY_BUFFER, len(p.colors) * size_of([4]f32), raw_data(p.colors), gl.STATIC_DRAW)
+            gl.EnableVertexAttribArray(10)
+            gl.VertexAttribPointer(10, 4, gl.FLOAT, false, size_of([4]f32), 0)
+        }
         gl.BindVertexArray(0)
         append(&gm.prims, g)
         append(&gm.hidden, false)
@@ -382,6 +455,7 @@ gl3d_model_destroy :: proc(gm: ^GL3D_Model) {
     for &g in gm.prims {
         gl.DeleteBuffers(1, &g.vbo)
         gl.DeleteBuffers(1, &g.ebo)
+        if g.cbo != 0 { gl.DeleteBuffers(1, &g.cbo) }
         gl.DeleteVertexArrays(1, &g.vao)
     }
     for t in gm.tex_srgb { if t != 0 { gl3d_destroy_texture(t) } }
@@ -431,13 +505,71 @@ gl3d_pbr_prim_matrix :: proc(pbr: ^GL3D_Pbr, gm: ^GL3D_Model, pi: int, pose: ^R3
 // Draw a model (skinned and static primitives) at `model`. pose may be nil
 // for static models (node transforms are then ignored).
 gl3d_pbr_draw_model :: proc(r: ^GL3D_Renderer, pbr: ^GL3D_Pbr, gm: ^GL3D_Model, pose: ^R3D_Model_Pose, model: linalg.Matrix4f32) {
+    gl3d_pbr_draw_impl(r, pbr, gm, pose, model, nil)
+}
+
+// Use gl3d_env lighting (cascaded shadows, sky ambient, height fog) for
+// every following draw; nil goes back to the Frame-block lighting.
+gl3d_pbr_use_env :: proc(pbr: ^GL3D_Pbr, env: ^GL3D_Env) {
+    pbr.env = env
+}
+
+// Give a model's primitives the per-instance matrix attribute (locations
+// 6-9, from the shared instance buffer) so it can be drawn instanced.
+gl3d_model_enable_instancing :: proc(pbr: ^GL3D_Pbr, gm: ^GL3D_Model) {
+    for &g in gm.prims {
+        gl.BindVertexArray(g.vao)
+        gl.BindBuffer(gl.ARRAY_BUFFER, pbr.inst_vbo)
+        for c in 0 ..< 4 {
+            loc := u32(6 + c)
+            gl.EnableVertexAttribArray(loc)
+            gl.VertexAttribPointer(loc, 4, gl.FLOAT, false, size_of(linalg.Matrix4f32), uintptr(c * 16))
+            gl.VertexAttribDivisor(loc, 1)
+            gl.DisableVertexAttribArray(loc)
+        }
+    }
+    gm.instancing = true
+    gl.BindVertexArray(0)
+    gl.BindBuffer(gl.ARRAY_BUFFER, 0)
+}
+
+@(private="file")
+gl3d_pbr_upload_instances :: proc(pbr: ^GL3D_Pbr, mats: []linalg.Matrix4f32) {
+    gl.BindBuffer(gl.ARRAY_BUFFER, pbr.inst_vbo)
+    bytes := len(mats) * size_of(linalg.Matrix4f32)
+    if len(mats) > pbr.inst_cap {
+        pbr.inst_cap = max(len(mats), pbr.inst_cap * 2)
+        gl.BufferData(gl.ARRAY_BUFFER, pbr.inst_cap * size_of(linalg.Matrix4f32), nil, gl.STREAM_DRAW)
+    } else {
+        // orphan, then fill
+        gl.BufferData(gl.ARRAY_BUFFER, pbr.inst_cap * size_of(linalg.Matrix4f32), nil, gl.STREAM_DRAW)
+    }
+    gl.BufferSubData(gl.ARRAY_BUFFER, 0, bytes, raw_data(mats))
+    gl.BindBuffer(gl.ARRAY_BUFFER, 0)
+}
+
+// Draw many copies of a static model (gl3d_model_enable_instancing first):
+// each primitive at instance * node transform (rest pose).
+gl3d_pbr_draw_model_instanced :: proc(r: ^GL3D_Renderer, pbr: ^GL3D_Pbr, gm: ^GL3D_Model, pose: ^R3D_Model_Pose, instances: []linalg.Matrix4f32) {
+    if len(instances) == 0 { return }
+    gl3d_pbr_upload_instances(pbr, instances)
+    gl3d_pbr_draw_impl(r, pbr, gm, pose, linalg.MATRIX4F32_IDENTITY, instances)
+}
+
+@(private="file")
+gl3d_pbr_draw_impl :: proc(r: ^GL3D_Renderer, pbr: ^GL3D_Pbr, gm: ^GL3D_Model, pose: ^R3D_Model_Pose, model: linalg.Matrix4f32, instances: []linalg.Matrix4f32) {
     gl3d_flush(r) // keep sprite batches in submission order
     gl.UseProgram(pbr.prog)
+    gl.VertexAttrib4f(10, 1, 1, 1, 1) // vertex color for meshes without COLOR_0
     aspect := f32(r.width) / f32(max(r.height, 1))
     uniforms := r3d_make_frame_uniforms(&r.camera, aspect, false, r.ambient, r.lights[:], &r.sun, &r.atmosphere)
     gl.BindBuffer(gl.UNIFORM_BUFFER, r.ubo)
     gl.BufferSubData(gl.UNIFORM_BUFFER, 0, size_of(R3D_Frame_Uniforms), &uniforms)
     gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, r.ubo)
+    if pbr.env != nil { gl3d_env_bind(pbr.env) }
+    gl.Uniform1i(pbr.loc_env, pbr.env != nil ? 1 : 0)
+    instanced := instances != nil
+    gl.Uniform1i(pbr.loc_instanced, instanced ? 1 : 0)
 
     gl.ActiveTexture(gl.TEXTURE2)
     gl.BindTexture(gl.TEXTURE_2D, r.shadow_tex)
@@ -453,7 +585,14 @@ gl3d_pbr_draw_model :: proc(r: ^GL3D_Renderer, pbr: ^GL3D_Pbr, gm: ^GL3D_Model, 
         mt := &def
         if p.material >= 0 && p.material < len(gm.src.materials) { mt = &gm.src.materials[p.material] }
 
-        gl3d_pbr_prim_matrix(pbr, gm, pi, pose, model, pbr.loc_skinned, pbr.loc_model)
+        if instanced {
+            m := linalg.MATRIX4F32_IDENTITY
+            if pose != nil && p.node >= 0 && p.node < len(pose.global) { m = pose.global[p.node] }
+            gl.UniformMatrix4fv(pbr.loc_model, 1, false, &m[0][0])
+            gl.Uniform1i(pbr.loc_skinned, 0)
+        } else {
+            gl3d_pbr_prim_matrix(pbr, gm, pi, pose, model, pbr.loc_skinned, pbr.loc_model)
+        }
         gl.Uniform2f(pbr.loc_uv_scale, mt.uv_scale.x, mt.uv_scale.y)
         gl.Uniform4f(pbr.loc_base_color, mt.base_color.x, mt.base_color.y, mt.base_color.z, mt.base_color.w)
         gl.Uniform4f(pbr.loc_mat, mt.metallic, mt.roughness, mt.normal_scale, mt.occlusion_tex >= 0 ? mt.occlusion_strength : 0)
@@ -476,7 +615,12 @@ gl3d_pbr_draw_model :: proc(r: ^GL3D_Renderer, pbr: ^GL3D_Pbr, gm: ^GL3D_Model, 
 
         if mt.double_sided { gl.Disable(gl.CULL_FACE) } else { gl.Enable(gl.CULL_FACE); gl.CullFace(gl.BACK) }
         gl.BindVertexArray(gm.prims[pi].vao)
-        gl.DrawElements(gl.TRIANGLES, gm.prims[pi].index_count, gl.UNSIGNED_INT, nil)
+        gl3d_set_instance_attribs(gm, instanced)
+        if instanced {
+            gl.DrawElementsInstanced(gl.TRIANGLES, gm.prims[pi].index_count, gl.UNSIGNED_INT, nil, i32(len(instances)))
+        } else {
+            gl.DrawElements(gl.TRIANGLES, gm.prims[pi].index_count, gl.UNSIGNED_INT, nil)
+        }
     }
     gl.BindVertexArray(0)
     gl.Disable(gl.CULL_FACE) // gl3d's sprite paths expect culling off
@@ -486,18 +630,60 @@ gl3d_pbr_draw_model :: proc(r: ^GL3D_Renderer, pbr: ^GL3D_Pbr, gm: ^GL3D_Model, 
 // gl3d_shadow_pass_begin (which binds the shadow target and light matrix).
 gl3d_pbr_shadow_begin :: proc(r: ^GL3D_Renderer, pbr: ^GL3D_Pbr) {
     if !r.sun.enabled || !r.sun.cast_shadows { return }
+    gl3d_pbr_shadow_begin_vp(pbr, r.sun.light_view_proj)
+}
+
+// Same with an explicit light matrix (a gl3d_env cascade).
+gl3d_pbr_shadow_begin_vp :: proc(pbr: ^GL3D_Pbr, light_vp: linalg.Matrix4f32) {
     gl.UseProgram(pbr.shadow_prog)
-    lvp := r.sun.light_view_proj
+    lvp := light_vp
     gl.UniformMatrix4fv(pbr.sloc_light_vp, 1, false, &lvp[0][0])
 }
 
 gl3d_pbr_draw_model_shadow :: proc(r: ^GL3D_Renderer, pbr: ^GL3D_Pbr, gm: ^GL3D_Model, pose: ^R3D_Model_Pose, model: linalg.Matrix4f32) {
-    if !r.sun.enabled || !r.sun.cast_shadows { return }
+    if pbr.env == nil && (!r.sun.enabled || !r.sun.cast_shadows) { return }
+    gl3d_pbr_shadow_impl(pbr, gm, pose, model, nil)
+}
+
+gl3d_pbr_draw_model_shadow_instanced :: proc(pbr: ^GL3D_Pbr, gm: ^GL3D_Model, pose: ^R3D_Model_Pose, instances: []linalg.Matrix4f32) {
+    if len(instances) == 0 { return }
+    gl3d_pbr_upload_instances(pbr, instances)
+    gl3d_pbr_shadow_impl(pbr, gm, pose, linalg.MATRIX4F32_IDENTITY, instances)
+}
+
+@(private="file")
+gl3d_pbr_shadow_impl :: proc(pbr: ^GL3D_Pbr, gm: ^GL3D_Model, pose: ^R3D_Model_Pose, model: linalg.Matrix4f32, instances: []linalg.Matrix4f32) {
+    instanced := instances != nil
+    gl.Uniform1i(pbr.sloc_instanced, instanced ? 1 : 0)
+    def := r3d_default_material()
     for pi in 0 ..< len(gm.prims) {
         if gm.hidden[pi] || gm.prims[pi].index_count == 0 { continue }
-        gl3d_pbr_prim_matrix(pbr, gm, pi, pose, model, pbr.sloc_skinned, pbr.sloc_model)
+        p := &gm.src.prims[pi]
+        mt := &def
+        if p.material >= 0 && p.material < len(gm.src.materials) { mt = &gm.src.materials[p.material] }
+        if instanced {
+            m := linalg.MATRIX4F32_IDENTITY
+            if pose != nil && p.node >= 0 && p.node < len(pose.global) { m = pose.global[p.node] }
+            gl.UniformMatrix4fv(pbr.sloc_model, 1, false, &m[0][0])
+            gl.Uniform1i(pbr.sloc_skinned, 0)
+        } else {
+            gl3d_pbr_prim_matrix(pbr, gm, pi, pose, model, pbr.sloc_skinned, pbr.sloc_model)
+        }
+        masked := mt.alpha_mode == .Mask && mt.base_color_tex >= 0 && mt.base_color_tex < len(gm.tex_srgb) && gm.tex_srgb[mt.base_color_tex] != 0
+        gl.Uniform1f(pbr.sloc_alpha_cutoff, masked ? mt.alpha_cutoff : -1)
+        gl.Uniform2f(pbr.sloc_uv_scale, mt.uv_scale.x, mt.uv_scale.y)
+        gl.Uniform4f(pbr.sloc_base_color, mt.base_color.x, mt.base_color.y, mt.base_color.z, mt.base_color.w)
+        if masked {
+            gl.ActiveTexture(gl.TEXTURE0)
+            gl.BindTexture(gl.TEXTURE_2D, gm.tex_srgb[mt.base_color_tex])
+        }
         gl.BindVertexArray(gm.prims[pi].vao)
-        gl.DrawElements(gl.TRIANGLES, gm.prims[pi].index_count, gl.UNSIGNED_INT, nil)
+        gl3d_set_instance_attribs(gm, instanced)
+        if instanced {
+            gl.DrawElementsInstanced(gl.TRIANGLES, gm.prims[pi].index_count, gl.UNSIGNED_INT, nil, i32(len(instances)))
+        } else {
+            gl.DrawElements(gl.TRIANGLES, gm.prims[pi].index_count, gl.UNSIGNED_INT, nil)
+        }
     }
     gl.BindVertexArray(0)
 }
